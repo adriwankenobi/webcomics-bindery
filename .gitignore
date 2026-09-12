@@ -1,0 +1,21 @@
+# git tracks only the process — comic data is reproducible from a source
+# folder: place "<comic>/" at the repo root, then upscale -> compose ->
+# detect -> sheets -> transcribe -> merge -> fit -> gimp pass -> qa -> merge.
+/*
+!/.gitignore
+!/ARCHITECTURE.md
+!/CLAUDE.md
+!/README.md
+!/justfile
+!/process.py
+!/template.xcf
+!/template_geometry.json
+!/gimp-plugin/
+!/relettering/
+/relettering/*
+!/relettering/*.py
+# comic fonts are licensed material: the user supplies them locally —
+# see relettering/fonts/README.md (only the instructions are tracked)
+!/relettering/fonts/
+/relettering/fonts/*
+!/relettering/fonts/README.md
