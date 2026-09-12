@@ -37,10 +37,61 @@ gimp-plugin/                 versioned copy of the GIMP compose plugin
 Git tracks **only the process** (whitelist `.gitignore`). All comic data is
 untracked and reproducible from the source folder alone.
 
+## Setup (one-time)
+
+Prerequisites: macOS, GIMP 2.10 in `/Applications`, plus `just` and `uv`.
+Steps 2–4 pull in material that is deliberately **not** in the repo
+(third-party binaries, model weights, licensed fonts).
+
+**1. Python environments** — two venvs; `cv2` lives only in the second:
+
+```
+just setup                             # .venv: playwright pillow pikepdf numpy
+uv venv .venv-reletter
+uv pip install --python .venv-reletter/bin/python \
+    opencv-python-headless pillow numpy fonttools
+```
+
+**2. Upscaler (Real-ESRGAN ncnn/Vulkan)** — a prebuilt upstream binary plus
+~74 MB of model weights. `process.py` expects
+`tools/realesrgan/realesrgan-ncnn-vulkan` with a sibling `models/` dir,
+which is exactly the zip's layout, so unpack it straight into place:
+
+```
+mkdir -p tools/realesrgan
+curl -L -o /tmp/realesrgan.zip \
+  https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesrgan-ncnn-vulkan-20220424-macos.zip
+unzip -o /tmp/realesrgan.zip -d tools/realesrgan
+chmod +x tools/realesrgan/realesrgan-ncnn-vulkan
+xattr -dr com.apple.quarantine tools/realesrgan    # macOS blocks it otherwise
+# smoke test (prints GPU lines + progress, writes /tmp/smoke.png):
+tools/realesrgan/realesrgan-ncnn-vulkan -n realesr-animevideov3 -s 2 \
+  -i tools/realesrgan/input.jpg -o /tmp/smoke.png -m tools/realesrgan/models
+```
+
+v0.2.5.0 is the last release carrying ncnn binaries (use the `-ubuntu` /
+`-windows` asset of the same release on other platforms). The pipeline runs
+`realesr-animevideov3`, not `realesrgan-x4plus-anime`, which visibly
+brightens and desaturates the artwork. **Always pass `-m <models dir>`** if
+you invoke the binary by hand: it resolves `models/` relative to the
+current directory and otherwise exits 1 printing nothing.
+
+**3. GIMP compose plugin** — copy the versioned plugin into GIMP's plug-ins
+dir and make it executable (GIMP silently skips plug-ins without the
+executable bit), then restart GIMP:
+
+```
+D=~/Library/Application\ Support/GIMP/2.10/plug-ins
+cp gimp-plugin/webcomics_compose.py "$D"/ && chmod +x "$D"/webcomics_compose.py
+```
+
+**4. Comic font** — user-supplied and licensed; follow
+`relettering/fonts/README.md` (needed only for the re-lettering stage).
+
 ## Base pipeline (`process.py`, via `justfile`)
 
 ```
-just setup                   one-time: venv + deps + playwright
+just setup                   base venv only (full install: Setup above)
 just process "<comic>"       upscale + compose + merge
 just upscale|compose|merge   individual steps (resumable)
 ```

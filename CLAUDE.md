@@ -41,6 +41,9 @@ session needs:
 
 ## Environments
 - Base pipeline: `.venv/bin/python` (pillow, pikepdf, numpy, playwright).
+- Upscaler: untracked third-party binary at
+  tools/realesrgan/realesrgan-ncnn-vulkan + models/ (install steps in
+  README "Setup"). Pass `-m <models dir>` by hand or it exits 1 silently.
 - Re-lettering: `.venv-reletter/bin/python` (opencv-python-headless, pillow,
   numpy, fonttools). cv2 is ONLY here.
 - GIMP batch = GIMP 2.10 python-fu = **Python 2**: no f-strings, encode
