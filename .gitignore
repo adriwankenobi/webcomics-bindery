@@ -8,6 +8,7 @@
 !/README.md
 !/justfile
 !/process.py
+!/tests/
 !/template.xcf
 !/template_geometry.json
 !/gimp-plugin/
@@ -19,3 +20,4 @@
 !/relettering/fonts/
 /relettering/fonts/*
 !/relettering/fonts/README.md
+__pycache__/

@@ -93,7 +93,12 @@ cp gimp-plugin/webcomics_compose.py "$D"/ && chmod +x "$D"/webcomics_compose.py
 ```
 just setup                   base venv only (full install: Setup above)
 just process "<comic>"       upscale + compose + merge
+just process "<comic>" --relettering
+                             the same plus the re-lettering stage below:
+                             pauses for the transcription, resumes when
+                             it is filled (see "One command")
 just upscale|compose|merge   individual steps (resumable)
+just test                    unit tests for the pipeline glue (tests/)
 ```
 
 - **upscale**: Real-ESRGAN (`realesr-animevideov3`) to the exact size GIMP
@@ -112,9 +117,41 @@ uniform size (the 35th percentile of per-bubble maxima), as **editable
 text layers** in the XCFs. **First supply the font** — copy it to
 `relettering/fonts/regular.ttf` + `bolditalic.ttf`, install it system-wide
 for GIMP, and set the GIMP family names in `relettering/fonts/fonts.json`
-(full instructions in `relettering/fonts/README.md`). Scripts run with
-`.venv-reletter/bin/python`, live in `relettering/`, and take the comic
-folder name as their required first argument:
+(full instructions in `relettering/fonts/README.md`).
+
+### One command
+
+```
+just process "<comic>" --relettering
+```
+
+runs every step below in order and stops once at the human step:
+
+```
+== TRANSCRIPTION NEEDED ==
+Sheets:   relettering/<comic>/sheets/sheet-001.jpg … sheet-NNN.jpg  (NNN sheets)
+Fill in:  relettering/<comic>/parts/sheet-NNN.json   (one string per bubble key; "" = leave untouched)
+Missing:  1839 bubbles on 264 pages
+Press Enter when done  (Ctrl-C to stop; re-run the same command to resume)
+```
+
+Fill the parts files (yourself, or by handing the sheets to an assistant),
+press Enter, and it carries on to the finished book PDF. Without a terminal
+it prints the same block and exits; re-running the command resumes. Every
+step is skipped by a filesystem marker, so the command is safe to re-run at
+any point: `pristine/` non-empty, `bubbles/*.json`, `sheets/manifest.json`,
+`layout.json` (the fit is **never** re-run automatically — it re-encodes
+every working page), and for the GIMP text pass a `qa/<stem>.png` newer
+than the page's `.xcf`. The preflight refuses to start without the fonts,
+`.venv-reletter` and GIMP, so a missing font can't surface after hours of
+upscaling. Final QA (`qa_scan.py`) runs as a report — the PDF is built
+regardless.
+
+### Step by step
+
+The same steps by hand. Scripts run with `.venv-reletter/bin/python`, live
+in `relettering/`, and take the comic folder name as their required first
+argument:
 
 ```
 relettering/reletter_detect.py "<comic>"   text-first bubble detection

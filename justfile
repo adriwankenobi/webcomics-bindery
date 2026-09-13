@@ -32,6 +32,10 @@ compose comic:
 merge comic:
     {{python}} process.py "{{comic}}" merge
 
-# full pipeline: upscale + compose + merge
-process comic:
-    {{python}} process.py "{{comic}}" all
+# full pipeline: upscale + compose + merge; --relettering = re-lettered book (pauses for the transcription, resumes when filled)
+process comic *flags:
+    {{python}} process.py "{{comic}}" all {{flags}}
+
+# unit tests for the pipeline glue (tests/)
+test:
+    {{python}} -m unittest discover tests

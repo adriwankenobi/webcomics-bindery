@@ -14,8 +14,11 @@ session needs:
 - process.py, the justfile and the GIMP compose plugin
   (~/Library/Application Support/GIMP/2.10/plug-ins/webcomics_compose.py,
   versioned copy in gimp-plugin/) are the stable base pipeline — extend
-  around them, don't edit them. The re-lettering scripts ARE the place for
-  algorithm fixes; prefer code over hand-edited masks (reproducibility).
+  around them, don't edit the base steps. The one extension inside
+  process.py is the `--relettering` driver (`cmd_reletter_book` + helpers,
+  unit-tested in tests/, `just test`). The re-lettering scripts ARE the
+  place for algorithm fixes; prefer code over hand-edited masks
+  (reproducibility).
 - Re-lettering code lives in relettering/ (reletter_detect/fit/gimp.py,
   qa_scan, merge_transcripts, make_sheets). Every
   script takes the comic name as argv[1] (reletter_gimp.py: RELETTER_COMIC
@@ -28,6 +31,15 @@ session needs:
   ({"size": N} | {"anchor": "visual"} | {"anchor": "lines"}), parts/zz-*.json
   transcript overrides (merge order = sorted filename, later wins; keep
   sheets/manifest.json counts in sync).
+- `just process "<comic>" --relettering` = the whole re-lettered book in
+  one resumable run; it pauses once (`== TRANSCRIPTION NEEDED ==`, Enter or
+  re-run to resume). Markers: pristine/ (skipped once layout.json exists),
+  bubbles/*.json, sheets/manifest.json, all manifest keys in parts/,
+  layout.json — detection and the fit are NEVER re-run by the driver — and
+  for the GIMP text pass qa/<stem>.png newer than the .xcf (delete the PNG
+  to force one page; a recompose forces it too, so the single-page recipe
+  no longer prunes layout.json). Postprocess runs only on the stems the
+  pass reported RELETTER DONE.
 - Steps are resumable: outputs are skipped when they exist. MTIME TRAP:
   compose skips iff xcf mtime >= upscaled mtime — bulk copies into
   upscaled/ must preserve mtimes (`cp -p`) or EVERY page recomposes and

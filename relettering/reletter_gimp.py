@@ -22,6 +22,8 @@ PDF_DIR = os.path.join(REPO, "pdf", NAME)
 UP_DIR = os.path.join(REPO, "upscaled", NAME)
 WORK = os.path.join(REPO, "relettering", NAME)
 QA_DIR = os.path.join(WORK, "qa")
+if not os.path.isdir(QA_DIR):
+    os.makedirs(QA_DIR)
 
 # GIMP font family names for the user-supplied comic font (the font must
 # also be installed system-wide so GIMP can see it). Defaults below;
@@ -65,6 +67,14 @@ for stem in sorted(layout.keys()):
     xcf = os.path.join(XCF_DIR, stem + ".xcf")
     if not os.path.isfile(xcf):
         log("MISSING " + xcf)
+        continue
+    # done marker: the QA render is written last, so a PNG at least as new
+    # as the XCF means this page already carries the text pass (compose
+    # recomposing the page makes the XCF newer again). Delete the PNG to
+    # force one page.
+    png = os.path.join(QA_DIR, stem + ".png")
+    if os.path.isfile(png) and os.path.getmtime(png) >= os.path.getmtime(xcf):
+        log("SKIP " + stem)
         continue
     img = pdb.gimp_file_load(xcf, xcf)
     # the page layer: dimensions match the upscaled image

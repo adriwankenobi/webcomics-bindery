@@ -76,6 +76,31 @@ fonttools). GIMP batch scripts run under GIMP 2.10's python-fu =
    land on the right, index/credits pages on the left, and spread halves on
    facing pages.
 
+### Re-lettered book driver (`--relettering`)
+
+`process.py <comic> all --relettering` (`cmd_reletter_book`, the one
+extension inside `process.py`; helpers unit-tested in `tests/`) chains the
+base pipeline with the `relettering/` scripts — each run under
+`.venv-reletter` via subprocess, the GIMP pass via GIMP batch — as one
+resumable run. There is no state file: every step is skipped by a marker
+on disk, so the same command resumes after the pause or after a failure.
+
+| step | skipped when | notes |
+|---|---|---|
+| preflight | — | fonts, `.venv-reletter`, GIMP present; refuses to start otherwise |
+| upscale | existing rule | |
+| pristine copies → `pristine/` | dir already holds the page; whole step once `layout.json` exists | `copy2` keeps mtimes; never overwrites |
+| detect | `bubbles/*.json` exists | never re-run automatically: it could reorder bubbles under the transcripts |
+| sheets | `sheets/manifest.json` exists | |
+| **transcription** | every manifest bubble has a key in `parts/*.json` | else **pause**: prints the sheets/parts paths and the gap count; a terminal blocks on Enter and re-checks, otherwise exit 0 |
+| merge transcripts | — | |
+| fit + clean | `layout.json` exists | never re-run automatically (re-encodes every working page) |
+| compose | existing mtime rule | cleaned pages are newer → recomposed |
+| GIMP text pass | per page: `qa/<stem>.png` mtime ≥ `.xcf` mtime | see Stage 4 |
+| postprocess | — | only the stems the pass reported `RELETTER DONE`, so no PDF is recompressed twice |
+| merge | — | |
+| qa_scan | — | report only |
+
 ## Re-lettering subsystem (`relettering/`)
 
 Re-typesets all dialogue with the user-supplied comic font
@@ -237,8 +262,15 @@ line height, per-line `y_top`/`cx`/width/styled runs, text color).
 
 Replaces each XCF's `relettering` layer group with fresh text layers
 (group → `bubble-NN` → one text layer per line/style run, positioned from
-`layout.json`), then re-exports the page PDF. Idempotent. Runs after
-compose; the re-exported PDFs need `postprocess_pdf` again, then merge.
+`layout.json`), then re-exports the page PDF and a half-size QA PNG into
+`qa/` (created if missing). Runs after compose; the re-exported PDFs need
+`postprocess_pdf` again, then merge.
+
+**Done marker.** The QA PNG is written last, so a page is skipped
+(`RELETTER SKIP <stem>`) when `qa/<stem>.png` is at least as new as its
+`.xcf`. Compose recomposing a page makes the XCF newer and the page is
+re-lettered on the next pass; a `layout.json`-only change does not — delete
+the page's PNG to force it. This mirrors compose's own mtime rule.
 
 ### Verification tooling
 
@@ -265,9 +297,10 @@ compose; the re-exported PDFs need `postprocess_pdf` again, then merge.
 4. Single-page fit with the **book size pinned** (a global refit would
    re-encode every working JPEG = generational loss); the driver must
    mirror `reletter_fit.main()` exactly.
-5. Delete the page's `.xcf`/`.pdf`, compose, run the GIMP pass with
-   `layout.json` temporarily pruned to the affected stems (restore after),
-   `postprocess_pdf`, merge.
+5. Delete the page's `.xcf`/`.pdf`, compose, run the GIMP pass — the
+   recomposed XCF is now newer than its `qa/<stem>.png`, so the pass
+   re-letters only that page (pruning `layout.json` is no longer needed) —
+   then `postprocess_pdf` on that PDF, merge.
 6. Verify: leftover scan + qa_scan + exact render overlay vs the source.
 7. **Scope discipline**: snapshot `layout.json` before the round and diff
    the entries of already-approved pages afterwards — detection/fit
@@ -287,6 +320,10 @@ compose; the re-exported PDFs need `postprocess_pdf` again, then merge.
   rectangles.
 - Pages refit without re-detection keep their OLD masks; any detection
   improvement only reaches a page when it is re-detected.
+- The `--relettering` driver never re-runs detection or the fit once their
+  outputs exist — that is deliberate (bubble order under the transcripts;
+  generational loss). Fix pages with the single-page loop, not by deleting
+  `bubbles/` or `layout.json` wholesale.
 - Fit drivers that import the scripts via importlib must set
   `sys.argv = [name, comic]` **before** `exec_module` (module-level argv
   check and workdir paths).

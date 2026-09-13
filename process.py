@@ -956,6 +956,335 @@ def cmd_merge(pdf_dir: Path, out_path: Path, upscaled_dir: Path) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# Re-lettered book: `process.py <comic> all --relettering` chains the base
+# pipeline with the relettering/ scripts, pausing for the human
+# transcription step. Every step is skipped by a filesystem marker.
+# ---------------------------------------------------------------------------
+
+
+def transcript_gaps(work: Path) -> dict:
+    """Bubbles the transcription hasn't covered yet: {short page key:
+    [bubble indices]} from sheets/manifest.json vs the keys present across
+    parts/*.json (any value counts, "" included — presence is what matters,
+    same as merge_transcripts.py)."""
+    import json
+    manifest = json.loads((work / "sheets" / "manifest.json").read_text())
+    have = set()
+    for part in sorted((work / "parts").glob("*.json")):
+        have.update(json.loads(part.read_text()).keys())
+    gaps = {}
+    for key, info in manifest.items():
+        missing = [bi for bi in range(1, info["count"] + 1)
+                   if f"{key} b{bi:02d}" not in have]
+        if missing:
+            gaps[key] = missing
+    return gaps
+
+
+def parse_reletter_done(output: str) -> list:
+    """Stems the GIMP text pass re-exported this run ("RELETTER DONE <stem>"
+    lines from reletter_gimp.py) — exactly the PDFs that need postprocessing."""
+    prefix = "RELETTER DONE "
+    return [line[len(prefix):].rstrip() for line in output.splitlines()
+            if line.startswith(prefix)]
+
+
+def parse_reletter_output(output: str) -> dict:
+    """Digest of a reletter_gimp.py run: stems re-exported ("done"), pages
+    skipped as already lettered ("skipped"), whether the script reached its
+    final "RELETTER ALL DONE" ("finished" — false = it died midway), and
+    every non-RELETTER line ("other": GIMP noise, or the traceback)."""
+    lines = output.splitlines()
+    return {
+        "done": parse_reletter_done(output),
+        "skipped": sum(1 for l in lines if l.startswith("RELETTER SKIP ")),
+        "finished": any(l.rstrip() == "RELETTER ALL DONE" for l in lines),
+        "other": [l for l in lines if not l.startswith("RELETTER ")],
+    }
+
+
+def gimp_pending_stems(work: Path, xcf_dir: Path) -> list:
+    """Laid-out pages whose XCF still lacks the text pass: the pass writes
+    qa/<stem>.png last, so png mtime >= xcf mtime marks a page done (compose
+    recomposing the page makes the XCF newer again). Pages with no XCF yet
+    are not pending — compose hasn't produced them."""
+    import json
+    layout = json.loads((work / "layout.json").read_text())
+    pending = []
+    for stem in sorted(layout):
+        xcf = xcf_dir / (stem + ".xcf")
+        if not xcf.is_file():
+            continue
+        png = work / "qa" / (stem + ".png")
+        if not png.is_file() or png.stat().st_mtime < xcf.stat().st_mtime:
+            pending.append(stem)
+    return pending
+
+
+RELETTER_DIR = REPO / "relettering"
+RELETTER_PY = REPO / ".venv-reletter" / "bin" / "python"
+FONT_FILES = ("regular.ttf", "bolditalic.ttf")
+
+
+def reletter_preflight(fonts_dir: Path = RELETTER_DIR / "fonts",
+                       reletter_py: Path = RELETTER_PY,
+                       gimp: Path = Path(GIMP)) -> list:
+    """What the re-lettering stage needs beyond the base pipeline; checked
+    up front so a missing font doesn't surface after hours of upscaling."""
+    problems = []
+    for f in FONT_FILES:
+        if not (fonts_dir / f).is_file():
+            problems.append(f"missing font {fonts_dir / f} — see "
+                            f"relettering/fonts/README.md")
+    if not reletter_py.is_file():
+        problems.append(f"missing {reletter_py} — create it as described in "
+                        f"README 'Setup'")
+    if not gimp.is_file():
+        problems.append(f"missing GIMP at {gimp}")
+    return problems
+
+
+def _rel(path: Path) -> str:
+    try:
+        return str(path.relative_to(REPO))
+    except ValueError:
+        return str(path)
+
+
+def wait_for_transcripts(work: Path, interactive: bool = None,
+                         read_line=input) -> bool:
+    """The human step. True once every manifest bubble has a transcript.
+    Interactive (a terminal): print what to fill in and block on Enter,
+    re-checking each time; Ctrl-C stops (False). Non-interactive: print the
+    same and return False — re-running the command resumes."""
+    if interactive is None:
+        interactive = sys.stdin.isatty()
+    while True:
+        gaps = transcript_gaps(work)
+        if not gaps:
+            return True
+        sheets = sorted((work / "sheets").glob("sheet-*.jpg"))
+        bubbles = sum(len(v) for v in gaps.values())
+        print("\n== TRANSCRIPTION NEEDED ==")
+        if sheets:
+            print(f"Sheets:   {_rel(sheets[0])} … {sheets[-1].name}  "
+                  f"({len(sheets)} sheets)")
+        print(f"Fill in:  {_rel(work / 'parts')}/sheet-NNN.json   "
+              f"(one string per bubble key; \"\" = leave untouched)")
+        print(f"Missing:  {bubbles} bubbles on {len(gaps)} pages")
+        if not interactive:
+            print("Re-run the same command to resume once they are filled.")
+            return False
+        try:
+            read_line("Press Enter when done  (Ctrl-C to stop; re-run the "
+                      "same command to resume) ")
+        except (KeyboardInterrupt, EOFError):
+            print("\nStopped. Re-run the same command to resume.")
+            return False
+
+
+def ensure_pristine(upscaled_dir: Path, work: Path) -> None:
+    """Untouched copies of the upscaled pages for qa_scan's pixel diff — taken
+    BEFORE the fit cleans upscaled/. Only ever fills gaps: a copy that exists
+    is the pristine one by definition and is never overwritten."""
+    import shutil
+    pristine = work / "pristine"
+    pristine.mkdir(parents=True, exist_ok=True)
+    copied = 0
+    for src in image_files(upscaled_dir):
+        dst = pristine / src.name
+        if dst.is_file():
+            continue
+        shutil.copy2(src, dst)      # keeps the mtime, like cp -p
+        copied += 1
+    print(f"pristine copies: {copied} added, "
+          f"{len(image_files(upscaled_dir)) - copied} already present")
+
+
+def reletter_status(work: Path, xcf_dir: Path) -> list:
+    """The upfront table: (step, state) per relettering marker, so a resumed
+    run shows where it stands before doing anything. States are "pending",
+    "done", or a short detail (transcription gap, pages left to letter)."""
+    fitted = (work / "layout.json").is_file()
+    manifest = work / "sheets" / "manifest.json"
+    pristine = work / "pristine"
+    rows = [
+        ("pristine copies",
+         "n/a (fit already ran)" if fitted
+         else "done" if pristine.is_dir() and image_files(pristine)
+         else "pending"),
+        ("bubble detection",
+         "done" if any((work / "bubbles").glob("*.json")) else "pending"),
+        ("contact sheets", "done" if manifest.is_file() else "pending"),
+    ]
+    if manifest.is_file():
+        gaps = transcript_gaps(work)
+        rows.append(("transcription", "complete" if not gaps else
+                     f"{sum(len(v) for v in gaps.values())} bubbles missing "
+                     f"on {len(gaps)} pages"))
+    else:
+        rows.append(("transcription", "pending"))
+    rows.append(("fit + clean", "done" if fitted else "pending"))
+    if fitted:
+        left = gimp_pending_stems(work, xcf_dir)
+        rows.append(("GIMP text layers",
+                     "done" if not left else f"{len(left)} pages pending"))
+    else:
+        rows.append(("GIMP text layers", "pending"))
+    return rows
+
+
+def run_reletter_script(script: str, name: str) -> int:
+    """One relettering/ script under its own venv (cv2 lives only there),
+    output streamed through."""
+    cmd = [str(RELETTER_PY), str(RELETTER_DIR / script), name]
+    print(f"$ .venv-reletter/bin/python relettering/{script} \"{name}\"",
+          flush=True)   # keep our output ahead of the child's in a log file
+    return subprocess.call(cmd, cwd=REPO)
+
+
+def run_gimp_text_pass(name: str) -> list:
+    """reletter_gimp.py under GIMP batch (adds the text layers, re-exports
+    the PDFs). Returns the stems it re-exported this run."""
+    import os
+    env = dict(os.environ, RELETTER_COMIC=name, RELETTER_REPO=str(REPO))
+    cmd = [GIMP, "-i", "-d", "--batch-interpreter", "python-fu-eval",
+           "-b", "execfile('relettering/reletter_gimp.py')",
+           "-b", "pdb.gimp_quit(0)"]
+    proc = subprocess.Popen(cmd, cwd=REPO, env=env, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True,
+                            errors="replace")
+    lines = []
+    for line in proc.stdout:
+        # progress: one line per lettered page; the SKIP flood is summarized
+        if line.startswith("RELETTER ") and not line.startswith("RELETTER SKIP "):
+            sys.stdout.write(line)
+            sys.stdout.flush()
+        lines.append(line)
+    proc.wait()
+    result = parse_reletter_output("".join(lines))
+    if result["skipped"]:
+        print(f"{result['skipped']} pages already lettered (skipped)")
+    if not result["finished"]:
+        # GIMP on macOS often exits non-zero after a SUCCESSFUL batch, so the
+        # exit code means nothing; a missing ALL DONE line does — show why
+        print(f"!! reletter_gimp.py did not finish (GIMP exit {proc.returncode})"
+              " — last lines of its output:")
+        for l in result["other"][-40:]:
+            print("   " + l)
+    return result["done"]
+
+
+def cmd_reletter_book(comic_dir: Path, upscaled_dir: Path, xcf_dir: Path,
+                      pdf_dir: Path, merged: Path, engine: str = "realesrgan",
+                      headed: bool = False) -> int:
+    """upscale -> pristine -> detect -> sheets -> [transcription pause] ->
+    merge -> fit -> compose -> GIMP text -> postprocess -> merge -> qa.
+    Resumable: every step is skipped by a filesystem marker, so the same
+    command continues after the pause (or after any failure)."""
+    name = comic_dir.name
+    work = RELETTER_DIR / name
+    problems = reletter_preflight()
+    if problems:
+        print("Re-lettering needs, before anything runs:")
+        for msg in problems:
+            print(f"  - {msg}")
+        return 1
+    fitted = (work / "layout.json").is_file()
+
+    print(f"Re-lettering status for {name} (upscale/compose/merge check "
+          "their own outputs):")
+    for label, state in reletter_status(work, xcf_dir):
+        print(f"  {label:<18} {state}")
+
+    def step(title: str) -> None:
+        print(f"\n=== {title} ===", flush=True)   # visible in redirected logs
+
+    step("upscale")
+    rc = cmd_upscale(comic_dir, upscaled_dir, engine=engine, headed=headed,
+                     cleanup_dirs=(xcf_dir, pdf_dir))
+    if rc != 0:
+        print("Upscale had failures — fix/retry, then re-run the same command.")
+        return rc
+
+    step("pristine copies")
+    if fitted:
+        print("skipped: the fit already cleaned upscaled/ — too late to take "
+              "pristine copies (regenerate one from the source if needed)")
+    else:
+        ensure_pristine(upscaled_dir, work)
+
+    step("bubble detection")
+    if any((work / "bubbles").glob("*.json")):
+        print(f"done: {_rel(work / 'bubbles')} exists. Detection is never "
+              "re-run automatically (it could reorder bubbles under the "
+              "transcripts); re-detect single pages per ARCHITECTURE.md.")
+    else:
+        rc = run_reletter_script("reletter_detect.py", name)
+        if rc != 0:
+            return rc
+
+    step("contact sheets")
+    if (work / "sheets" / "manifest.json").is_file():
+        print(f"done: {_rel(work / 'sheets' / 'manifest.json')} exists")
+    else:
+        rc = run_reletter_script("make_sheets.py", name)
+        if rc != 0:
+            return rc
+
+    step("transcription")
+    if not wait_for_transcripts(work):
+        return 0
+    print("complete")
+    rc = run_reletter_script("merge_transcripts.py", name)
+    if rc != 0:
+        return rc
+
+    step("fit + clean")
+    if fitted:
+        print(f"done: {_rel(work / 'layout.json')} exists. A global refit is "
+              "never automatic (it re-encodes every working page); to redo "
+              "one page follow the single-page recipe in ARCHITECTURE.md.")
+    else:
+        rc = run_reletter_script("reletter_fit.py", name)
+        if rc != 0:
+            return rc
+
+    step("compose")
+    rc = cmd_compose(upscaled_dir, xcf_dir, pdf_dir, comic_dir)
+    if rc != 0:
+        return rc
+
+    step("GIMP text layers")
+    pending = gimp_pending_stems(work, xcf_dir)
+    if not pending:
+        print("done: every laid-out page has a QA render newer than its XCF")
+    else:
+        print(f"{len(pending)} pages to letter")
+        done = run_gimp_text_pass(name)
+        step("PDF postprocess")
+        for stem in done:
+            postprocess_pdf(pdf_dir / (stem + ".pdf"))
+        print(f"{len(done)} PDFs recompressed + sRGB-tagged")
+        still = gimp_pending_stems(work, xcf_dir)
+        if still:
+            print(f"!! {len(still)} pages still pending after the GIMP pass "
+                  f"(see the RELETTER lines above): " + ", ".join(still[:5]))
+            return 1
+
+    step("merge")
+    rc = cmd_merge(pdf_dir, merged, upscaled_dir)
+    if rc != 0:
+        return rc
+
+    step("QA scan (report only)")
+    if run_reletter_script("qa_scan.py", name) != 0:
+        print("qa_scan flagged pages — review them per ARCHITECTURE.md "
+              "'Verification tooling' (the book PDF is built regardless)")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -968,7 +1297,14 @@ def main() -> int:
                          "lettering intact) or iloveimg.com")
     ap.add_argument("--headed", action="store_true",
                     help="show the browser while upscaling (iloveimg only)")
+    ap.add_argument("--relettering", action="store_true",
+                    help="full pipeline with the re-lettering stage: pauses "
+                         "for the transcription, resumes when it is filled")
     args = ap.parse_args()
+    if args.relettering and args.step != "all":
+        print("--relettering only applies to the full pipeline "
+              "(process.py <comic> all --relettering, i.e. 'just process').")
+        return 2
 
     comic_dir = Path(args.comic)
     if not comic_dir.is_dir():
@@ -986,6 +1322,10 @@ def main() -> int:
     if args.step == "scan":
         report_scan(comic_dir, upscaled_dir, args.engine)
         return 0
+    if args.relettering:
+        return cmd_reletter_book(comic_dir, upscaled_dir, xcf_dir, pdf_dir,
+                                 REPO / "pdf" / f"{name}.pdf",
+                                 engine=args.engine, headed=args.headed)
     if args.step in ("upscale", "all"):
         rc = cmd_upscale(comic_dir, upscaled_dir, engine=args.engine,
                          headed=args.headed,
