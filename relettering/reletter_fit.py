@@ -6,6 +6,7 @@ pages over pipeline/upscaled/... and a layout.json for the GIMP text step."""
 
 import json
 import re
+import time
 from pathlib import Path
 
 import cv2
@@ -860,7 +861,14 @@ def main():
                 return size, lines
         return None, None
 
-    # per-bubble maxima (margin/open notes stay near their original size)
+    # per-bubble maxima (margin/open notes stay near their original size).
+    # This pass is the long one: every bubble searches down from MAX_SIZE
+    # until a size fits, and the doomed large sizes cost the most, so it
+    # reports progress rather than going silent for a very long time.
+    n_total = sum(len(pen) for _, pen, _, _ in all_pending)
+    n_done, t_start = 0, time.time()
+    print(f"\nsizing {n_total} bubbles (searching down from {MAX_SIZE}px)",
+          flush=True)
     for _, pending, _, _ in all_pending:
         for p in pending:
             cap = MAX_SIZE
@@ -869,6 +877,13 @@ def main():
                 cap = max(MIN_SIZE + 1,
                           int(round(p["oldh"] / ratio * 1.1)))
             p["max_size"], _ = best_fit(p, cap)
+            n_done += 1
+            if n_done % 25 == 0 or n_done == n_total:
+                el = time.time() - t_start
+                eta = el / n_done * (n_total - n_done)
+                print(f"  sizing {n_done}/{n_total} "
+                      f"({100 * n_done // n_total}%) — {el / 60:.0f} min "
+                      f"elapsed, ~{eta / 60:.0f} min left", flush=True)
 
     # the book's common size: a low percentile of the dialogue maxima, so
     # nearly all bubbles carry the same size and only the densest shrink
@@ -881,7 +896,10 @@ def main():
           f"bubbles at full size)")
 
     ratio = fit.cap_height(100) / 100.0
-    for path, pending, clean_jobs, img in all_pending:
+    n_pages = len(all_pending)
+    t_start = time.time()
+    print(f"\nfitting and cleaning {n_pages} pages", flush=True)
+    for n_page, (path, pending, clean_jobs, img) in enumerate(all_pending, 1):
         page_entries = []
         fitted = set()
         # grouped lobes of a compound balloon share the smallest size
@@ -942,6 +960,12 @@ def main():
                         [cv2.IMWRITE_JPEG_QUALITY, 95,
                          int(cv2.IMWRITE_JPEG_SAMPLING_FACTOR),
                          cv2.IMWRITE_JPEG_SAMPLING_FACTOR_444])
+        el = time.time() - t_start
+        eta = el / n_page * (n_pages - n_page)
+        print(f"  [{n_page}/{n_pages}] {path.stem}: "
+              f"{len(page_entries)} bubbles typeset"
+              f"{'' if changed else ' (page unchanged)'}"
+              f" — ~{eta / 60:.0f} min left", flush=True)
 
     (WORK / "layout.json").write_text(json.dumps(layout, indent=1))
     gains = [g for *_, g in report if g]
