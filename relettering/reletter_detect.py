@@ -12,12 +12,28 @@ import cv2
 import numpy as np
 
 REPO = Path(__file__).resolve().parent.parent
-if len(sys.argv) < 2:
-    sys.exit('usage: reletter_detect.py "<comic folder name>"')
-COMIC = sys.argv[1]
-PAGES_DIR = REPO / "upscaled" / COMIC
-OUT = REPO / "relettering" / COMIC / "bubbles"
-SRC_DIR = REPO / COMIC
+COMIC = PAGES_DIR = OUT = SRC_DIR = None
+
+
+def configure(comic):
+    """Point the module at one comic. Called automatically at import when
+    the comic is on argv (how the pipeline and the qa-tools invoke it), so
+    the command line is unchanged; importing this as a LIBRARY — for
+    detection's own `letter_mask`, which the leftover scan re-runs over the
+    cleaned pages — calls it explicitly instead of faking sys.argv.
+    """
+    global COMIC, PAGES_DIR, OUT, SRC_DIR
+    COMIC = comic
+    PAGES_DIR = REPO / "upscaled" / comic
+    OUT = REPO / "relettering" / comic / "bubbles"
+    SRC_DIR = REPO / comic
+
+
+# only when THIS is the program being run — see the note in reletter_fit
+_argv0 = Path(sys.argv[0]).name if sys.argv else ""
+if ((__name__ == "__main__" or _argv0.startswith("reletter_"))
+        and len(sys.argv) > 1 and not sys.argv[1].startswith("-")):
+    configure(sys.argv[1])
 
 DARK_MAX = 110
 LIGHT_MIN = 160
@@ -133,6 +149,78 @@ def follow_lobe(comp, bcy, ref, bw):
             cur = (x0, x1)
             y += step
     return clipped
+
+
+def own_block_mask(shape, origin, block, others=(), letters=None, pad=6):
+    """`block` as a bool mask in a frame starting at `origin`, minus the part
+    of it that holds ANOTHER entry's lettering.
+
+    Every guard in here protects "a lobe's own text block" — the region its
+    lettering has to go in, which may never be ceded or cut away. But a block
+    is a blob cluster, and where two of them overlap the clustering could not
+    tell whose lettering it is: p294 b07's block reached over b12's first
+    line, so the protection held b12's "SI DESEAS" inside b07's mask, and
+    with it the slice of b12's balloon b07's flood had filled.
+
+    Subtract where the sibling's LETTERS are, not its whole rect. Two blocks
+    can overlap by a sliver that holds no sibling lettering at all and is
+    where this lobe's own last line ends — p294 b04's block overlaps b06's by
+    30px, and dropping that sliver cost it five size steps. `letters` is the
+    page letter mask in the same frame as `shape`; without it the whole rect
+    goes, which is only ever right when there is nothing better to go on."""
+    ox, oy = origin
+    m = np.zeros(shape, bool)
+    bx, by, bw, bh = block
+    m[max(0, by - oy):max(0, by + bh - oy),
+      max(0, bx - ox):max(0, bx + bw - ox)] = True
+    for cx, cy, cw, ch in others:
+        ys = slice(max(0, cy - oy), max(0, cy + ch - oy))
+        xs = slice(max(0, cx - ox), max(0, cx + cw - ox))
+        if letters is None:
+            m[ys, xs] = False
+            continue
+        hit = np.zeros(shape, bool)
+        hit[ys, xs] = letters[ys, xs] > 0
+        if not hit.any():
+            continue                    # no sibling lettering in the overlap
+        ry, rx = np.nonzero(hit)
+        m[max(0, ry.min() - pad):ry.max() + 1 + pad,
+          max(0, rx.min() - pad):rx.max() + 1 + pad] = False
+    return m
+
+
+def seam_split(union, seeds):
+    """Split one joined region between two lobes along the seam equidistant
+    from their own lettering. Returns [mask_a, mask_b] (uint8, same shape).
+
+    The straight row/column cut between the two text blocks assumes the
+    lobes are stacked or side by side. When their blocks overlap on BOTH
+    axes the lobes are DIAGONAL and no straight line separates them: on p294
+    b07's block reaches down and right into b12's first line, so the row
+    window ran from b07's block bottom (1971) UP to b12's block top (1938)
+    and the cut fell at 1954 — straight through b07's own last line. The
+    mask lost that line, which the cleaner is confined to the mask and so
+    could not reach, and kept the slice of b12's balloon the flood had
+    filled, so the last new line was set 274px wide in a 220px balloon.
+
+    Equidistant assignment gives each lobe the part of the shape nearer its
+    own type, which is how the artist drew the pair, and can never cross
+    either lobe's letters."""
+    reg = (union > 0)
+    d = []
+    for s in seeds:
+        m = reg & (np.asarray(s) > 0)
+        if not m.any():                 # no letters of its own to go on
+            d.append(np.full(reg.shape, np.inf, np.float32))
+            continue
+        d.append(cv2.distanceTransform((~m).astype(np.uint8),
+                                       cv2.DIST_L2, 3).astype(np.float32))
+    if np.isinf(d[0]).all() or np.isinf(d[1]).all():
+        return [reg.astype(np.uint8), np.zeros(reg.shape, np.uint8)] \
+            if np.isinf(d[1]).all() else \
+            [np.zeros(reg.shape, np.uint8), reg.astype(np.uint8)]
+    first = d[0] <= d[1]
+    return [(reg & first).astype(np.uint8), (reg & ~first).astype(np.uint8)]
 
 
 def strict_bubble(img, letters, bx, by, bw, bh, gutter=None, luma=False,
@@ -451,8 +539,35 @@ def detect_page(path: Path):
             if walked is None or walked.sum() < 1.2 * bw * bh:
                 # can't segment a lobe of its own: fold into the host as an
                 # extra paragraph (the fit's lobe-banding handles centering)
+                hb = list(host["block"])          # before the merge
                 host["block"] = merge_boxes(host["block"], [bx, by, bw, bh])
                 host["paragraphs"] += 1
+                # The host's mask must cover BOTH lobes, or the folded
+                # paragraph has nowhere to go: p37 kept a 603x51 strip
+                # spanning two balloons, so neither was ever cleaned or
+                # typeset. Recover each block's own drawn balloon and union
+                # them — the fit's lobe decomposition then hands each
+                # paragraph its own lobe, and the bubble COUNT is unchanged
+                # so the transcripts stay valid.
+                pieces = []
+                for (qx, qy, qw, qh) in (hb, [bx, by, bw, bh]):
+                    sp = strict_bubble(img, letters, qx, qy, qw, qh, gutter)
+                    if sp is not None:
+                        pieces.append(sp)
+                if len(pieces) == 2:
+                    ux0 = min(p2[0] for p2 in pieces)
+                    uy0 = min(p2[1] for p2 in pieces)
+                    ux1 = max(p2[0] + p2[2].shape[1] for p2 in pieces)
+                    uy1 = max(p2[1] + p2[2].shape[0] for p2 in pieces)
+                    um = np.zeros((uy1 - uy0, ux1 - ux0), np.uint8)
+                    for (px, py, pm) in pieces:
+                        sl = um[py - uy0:py - uy0 + pm.shape[0],
+                                px - ux0:px - ux0 + pm.shape[1]]
+                        np.maximum(sl, pm, out=sl)
+                    host["mask"] = um
+                    host["bbox"] = [int(ux0), int(uy0),
+                                    int(ux1 - ux0), int(uy1 - uy0)]
+                    host["strict"] = True
                 continue
             new = {"kind": "bubble", "strict": True,
                    "block": [int(bx), int(by), int(bw), int(bh)],
@@ -844,6 +959,22 @@ def detect_page(path: Path):
         bm = b["mask"][y0 - by2:y1 - by2, x0 - bx2:x1 - bx2]
         return bool((am & bm).any())
 
+    def _cut(e, at, axis, keep_before):
+        """Zero one side of e's mask at page coordinate `at`.
+
+        Skipped when it would leave the lobe with almost nothing: the clamp
+        that keeps the cut clear of the upper/left lobe's own lettering can
+        push it right past the other lobe's whole mask, and a lobe with an
+        empty mask breaks everything downstream."""
+        off = e["bbox"][axis]
+        i = max(0, min(e["mask"].shape[axis], at - off))
+        sl = [slice(None), slice(None)]
+        sl[axis] = slice(i, None) if keep_before else slice(0, i)
+        trial = e["mask"].copy()
+        trial[tuple(sl)] = 0
+        if trial.sum() >= 0.25 * e["mask"].sum():
+            e["mask"] = trial
+
     def crop_to_mask(e):
         m = e["mask"]
         ys, xs = np.nonzero(m)
@@ -893,18 +1024,20 @@ def detect_page(path: Path):
             left, right = ((host, e) if hbx <= ebx else (e, host))
             midx = (left["block"][0] + left["block"][2]
                     + right["block"][0]) // 2
-            lx = left["bbox"][0]
-            left["mask"][:, max(0, midx - lx):] = 0
-            rx = right["bbox"][0]
-            right["mask"][:, :max(0, midx - rx)] = 0
+            # never inside a lobe's OWN text block: cutting there leaves that
+            # lettering outside every mask, so it is never cleaned and the
+            # new text lands on top of it (the rule cede() states below). A
+            # no-op unless the blocks overlap, which inverts the midline.
+            midx = max(midx, left["block"][0] + left["block"][2])
+            _cut(left, midx, 1, True)
+            _cut(right, midx, 1, False)
         else:
             upper, lower = ((host, e) if hby <= eby else (e, host))
             mid = (upper["block"][1] + upper["block"][3]
                    + lower["block"][1]) // 2
-            uy = upper["bbox"][1]
-            upper["mask"][max(0, mid - uy):] = 0
-            ly = lower["bbox"][1]
-            lower["mask"][:max(0, mid - ly)] = 0
+            mid = max(mid, upper["block"][1] + upper["block"][3])
+            _cut(upper, mid, 0, True)
+            _cut(lower, mid, 0, False)
         if host["mask"].any():
             crop_to_mask(host)
         if e["mask"].any():
@@ -932,8 +1065,48 @@ def detect_page(path: Path):
                   >= 0.5 * ebw)
         if cov < 0.85 * ebh:
             continue
-        e["mask"] = m
-        e["bbox"] = [int(sx), int(sy), int(m.shape[1]), int(m.shape[0])]
+        # ...and the 15% it may miss must not be a TRUNCATION at an end of
+        # the block. p149 b08's flood stopped 12px above its block's bottom
+        # — 89% covered, so it was accepted — and the mask lost the last
+        # line, "SU PODER.", which the cleaner (confined to the mask) then
+        # could not reach and the reader saw standing under the new text.
+        # Give those rows back from the mask this one replaces, bounded to
+        # the block: past the block the old mask has nothing to vouch for it.
+        px, py = e["bbox"][:2]
+        prev, pm = e["mask"], e["mask"].shape
+        ux0, uy0 = min(sx, px), min(sy, py)
+        ux1 = max(sx + m.shape[1], px + pm[1])
+        uy1 = max(sy + m.shape[0], py + pm[0])
+        keep = np.zeros((uy1 - uy0, ux1 - ux0), np.uint8)
+        keep[sy - uy0:sy - uy0 + m.shape[0],
+             sx - ux0:sx - ux0 + m.shape[1]] = m
+        blk = own_block_mask(keep.shape, (ux0, uy0), e["block"],
+                             [q["block"] for q in merged if q is not e
+                              and q["kind"] == "bubble"],
+                             letters=letters[uy0:uy1, ux0:ux1])
+        # ...and ONLY the truncated end: block rows the new mask does not
+        # reach at all, kept inside its own columns. Repairing every missing
+        # pixel inside the block lets the old mask WIDEN the new one, and a
+        # block runs a little past its own balloon — p294 b06's mask grew 9px
+        # left into b04's balloon, which moved the notch cut between them and
+        # cost b04 five size steps on a one-word line.
+        band = np.zeros(keep.shape, bool)
+        band[:sy - uy0] = True
+        band[sy - uy0 + m.shape[0]:] = True
+        band[:, :sx - ux0] = False
+        band[:, sx - ux0 + m.shape[1]:] = False
+        miss = blk & band & (keep == 0)
+        if miss.any():
+            old = np.zeros(keep.shape, np.uint8)
+            old[py - uy0:py - uy0 + pm[0], px - ux0:px - ux0 + pm[1]] = prev
+            keep[miss & (old > 0)] = 1
+        ys_, xs_ = np.nonzero(keep)
+        if not len(ys_):
+            continue
+        e["mask"] = keep[ys_.min():ys_.max() + 1, xs_.min():xs_.max() + 1]
+        e["bbox"] = [int(ux0 + xs_.min()), int(uy0 + ys_.min()),
+                     int(xs_.max() - xs_.min() + 1),
+                     int(ys_.max() - ys_.min() + 1)]
         e["strict"] = True
 
     # where two refreshed lobes of a group overlap (one flood wrapped around
@@ -960,6 +1133,27 @@ def detect_page(path: Path):
             x, y = e["bbox"][:2]
             mh, mw = e["mask"].shape
             can[k, y - uy0:y - uy0 + mh, x - ux0:x - ux0 + mw] = e["mask"]
+        def cede(loser, take):
+            """Zero `take` from loser's mask, but NEVER inside loser's own
+            text block: that block is where this balloon's lettering has to
+            go, so ceding it leaves the text outside every mask — it never
+            gets cleaned (the old letters stay and the new text lands on
+            top of them) and the fit has no room, so the size collapses.
+
+            "Its own" excludes whatever the sibling's block claims too: a
+            block is a blob cluster and p294 b07's reached over b12's first
+            line, so this guard held its SIBLING's lettering inside b07 and
+            with it the slice of b12's balloon b07's flood had filled."""
+            other = (a if loser is b2 else b2)["block"]
+            prot = own_block_mask(take.shape, (ux0, uy0), loser["block"],
+                                  (other,),
+                                  letters=letters[uy0:uy1, ux0:ux1])
+            t = take & ~prot
+            lx, ly = loser["bbox"][:2]
+            lmh, lmw = loser["mask"].shape
+            loser["mask"][t[ly - uy0:ly - uy0 + lmh,
+                            lx - ux0:lx - ux0 + lmw]] = 0
+
         ov = (can[0] > 0) & (can[1] > 0)
         if not ov.any():
             continue
@@ -974,11 +1168,7 @@ def detect_page(path: Path):
             # fall through to the notch split below.
             k_small = 0 if sums[0] <= sums[1] else 1
             loser = (a, b2)[1 - k_small]
-            keep = can[k_small] > 0
-            x, y = loser["bbox"][:2]
-            mh, mw = loser["mask"].shape
-            loser["mask"][(ov & keep)[y - uy0:y - uy0 + mh,
-                                      x - ux0:x - ux0 + mw]] = 0
+            cede(loser, ov & (can[k_small] > 0))
             continue
         # OVERLAPPING (not joined) balloons: the FRONT one's outline runs
         # continuously through the overlap zone, so the interface between
@@ -998,9 +1188,7 @@ def detect_page(path: Path):
             iface.append(float(dark_iface[nb].mean()) if nb.any() else 1.0)
         if max(iface) > 0.04 and min(iface) < 0.5 * max(iface):
             loser = (a, b2)[iface.index(max(iface))]
-            x, y = loser["bbox"][:2]
-            mh, mw = loser["mask"].shape
-            loser["mask"][ov[y - uy0:y - uy0 + mh, x - ux0:x - ux0 + mw]] = 0
+            cede(loser, ov)
             continue
         # JOINED pair (ink on neither interface): one white shape with a
         # waist notch between the lobes. Split the UNION at the shallowest
@@ -1011,7 +1199,32 @@ def detect_page(path: Path):
         axov = (min(a["block"][0] + a["block"][2],
                     b2["block"][0] + b2["block"][2])
                 - max(a["block"][0], b2["block"][0]))
-        if axov < 0.25 * min(a["block"][2], b2["block"][2]):
+        ayov = (min(a["block"][1] + a["block"][3],
+                    b2["block"][1] + b2["block"][3])
+                - max(a["block"][1], b2["block"][1]))
+        if (axov >= 0.25 * min(a["block"][2], b2["block"][2])
+                and ayov >= 0.25 * min(a["block"][3], b2["block"][3])):
+            # DIAGONAL lobes: the blocks overlap on BOTH axes, so neither a
+            # row nor a column separates them and the window below runs
+            # BACKWARDS — p294's cut fell at 1954, inside b07's own last
+            # line, and the mask lost it (which the cleaner, bounded
+            # to the mask, could not reach) while keeping the slice of b12's
+            # balloon the flood had filled. Split on the seam equidistant
+            # from each lobe's own lettering instead.
+            seeds = []
+            for e in (a, b2):
+                sx, sy, sw, sh = e["block"]
+                s = np.zeros(union.shape, np.uint8)
+                s[max(0, sy - uy0):max(0, sy + sh - uy0),
+                  max(0, sx - ux0):max(0, sx + sw - ux0)] = 1
+                seeds.append(s & (letters[uy0:uy1, ux0:ux1] > 0))
+            # a letter inside BOTH blocks says nothing about which lobe it
+            # belongs to (b07's block swallowed b12's first line)
+            both = (seeds[0] > 0) & (seeds[1] > 0)
+            seeds = [s & ~both for s in seeds]
+            pa, pb = seam_split(union, seeds)
+            parts = {id(a): pa > 0, id(b2): pb > 0}
+        elif axov < 0.25 * min(a["block"][2], b2["block"][2]):
             left, right = ((a, b2) if a["block"][0] <= b2["block"][0]
                            else (b2, a))
             lo = left["block"][0] + left["block"][2] - ux0 - 10
@@ -1048,8 +1261,21 @@ def detect_page(path: Path):
     # (computed from bbox width) and biases the row centroid — the text then
     # sits off the visible lobe center
     for e in merged:
-        if e.get("mask") is not None:
-            crop_to_mask(e)
+        if e.get("mask") is None:
+            continue
+        # ...and drop the DEBRIS the splits leave behind first, or the crop
+        # is no crop at all: ceding its sibling's oval left p294 b07 with two
+        # slivers of that balloon's rim, 1.4% and 0.4% of its mask, which
+        # held its bbox 130px taller than the balloon it is for. A lobe is
+        # never a two-percent fragment.
+        nc, lc, sc, _ = cv2.connectedComponentsWithStats(e["mask"], 8)
+        if nc > 2:
+            tot = float(e["mask"].sum())
+            drop = [i for i in range(1, nc) if sc[i, 4] < 0.02 * tot]
+            if drop and len(drop) < nc - 1:
+                for i in drop:
+                    e["mask"][lc == i] = 0
+        crop_to_mask(e)
 
     bubbles = []
     for e in merged:
@@ -1212,4 +1438,6 @@ def main():
 
 
 if __name__ == "__main__":
+    if COMIC is None:
+        sys.exit('usage: reletter_detect.py "<comic folder name>"')
     sys.exit(main())

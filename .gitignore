@@ -15,6 +15,26 @@
 !/relettering/
 /relettering/*
 !/relettering/*.py
+# QA gates and rebuild drivers are PROCESS, not comic data: CLAUDE.md
+# requires them on every batch, and a book cannot be verified without
+# them. The eyeball helpers beside them (crop/zoom/montage/...) are
+# throwaway scratch and stay untracked.
+!/relettering/qa-tools/
+/relettering/qa-tools/*
+!/relettering/qa-tools/README.md
+!/relettering/qa-tools/leftover.py
+!/relettering/qa-tools/faint_scan.py
+!/relettering/qa-tools/qagate.py
+!/relettering/qa-tools/protrude.py
+!/relettering/qa-tools/reclean_all.py
+!/relettering/qa-tools/promote.py
+!/relettering/qa-tools/refit1.py
+!/relettering/qa-tools/refit_subset.py
+!/relettering/qa-tools/rebuild_fit.py
+!/relettering/qa-tools/redetect_dry.py
+!/relettering/qa-tools/redetect_apply.py
+!/relettering/qa-tools/split_caps.py
+!/relettering/qa-tools/gate_split.py
 # comic fonts are licensed material: the user supplies them locally —
 # see relettering/fonts/README.md (only the instructions are tracked)
 !/relettering/fonts/

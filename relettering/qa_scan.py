@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Post-build QA: (1) artifact scan — diff each cleaned upscaled page
 against the pristine (us trade) copy; every repaint footprint must be
-text-shaped (no blob with area>4000 and min-dim>35). (2) coverage stats."""
+text-shaped. (2) coverage stats."""
 
 import json
 import sys
@@ -18,6 +18,21 @@ CLEAN = REPO / "upscaled" / COMIC
 # pristine (pre-cleaning) pages, regenerated on demand from sources via
 # `process.py upscale`
 PRISTINE = REPO / "relettering" / COMIC / "pristine"
+
+def is_artifact(w, h, area):
+    """True when a repaint footprint is too big to be lettering.
+
+    Two gates, because the damage comes in two shapes:
+      * a solid blob of repainted art — large area;
+      * an ERASED BALLOON OUTLINE — a long thin curve, so its area stays
+        small while it spans the whole balloon. That slipped the area gate
+        entirely: whole balloons vanished from the book (their text left
+        floating on bare art) and this scan reported CLEAN.
+    No line of lettering is ~45px in its SHORT dimension, so min-dim is
+    what separates a wiped outline from a wiped line of text.
+    """
+    return (area > 4000 and min(w, h) > 35) or (min(w, h) >= 45 and area >= 400)
+
 
 bad = 0
 pages = 0
@@ -38,7 +53,7 @@ for f in sorted(list(CLEAN.glob("*.jpg")) + list(CLEAN.glob("*.png"))):
     n, lab, st, _ = cv2.connectedComponentsWithStats(d, 8)
     for i in range(1, n):
         x, y, w, h, area = st[i]
-        if area > 4000 and min(w, h) > 35:
+        if is_artifact(w, h, area):
             print(f"ARTIFACT {f.name}: blob at ({x},{y}) {w}x{h} area={area}")
             bad += 1
 

@@ -45,9 +45,17 @@ def log(msg):
     sys.stdout.flush()
 
 
-def make_text_layer(img, text, style, size, color=(0, 0, 0)):
+def make_text_layer(img, text, style, size, color=(0, 0, 0), track=0.0):
+    """One text layer. `track` is negative letter spacing in px: the fit
+    reaches for it only where a balloon is too tight for the size, and it
+    narrows the line by exactly spacing x (chars - 1) (measured in GIMP).
+    Set as a TEXT-LAYER property, so the layer stays editable in the XCF
+    and the glyphs keep their own shapes — scaling the layer would do
+    neither."""
     lyr = pdb.gimp_text_fontname(img, None, 0, 0, text.encode("utf-8"),
                                  0, True, size, 0, FONT[style])
+    if track:
+        pdb.gimp_text_layer_set_letter_spacing(lyr, track)
     pdb.gimp_text_layer_set_color(lyr, color)
     pdb.gimp_image_set_active_layer(img, lyr)
     return lyr
@@ -105,16 +113,19 @@ for stem in sorted(layout.keys()):
         bgroup = pdb.gimp_layer_group_new(img)
         pdb.gimp_item_set_name(bgroup, "bubble-%02d" % b["index"])
         pdb.gimp_image_insert_layer(img, bgroup, group, 0)
-        size = b["font_px"]
-        lh = b["line_height"]
         color = (255, 255, 255) if b.get("color") == "white" else (0, 0, 0)
         for li, line in enumerate(b["lines"]):
             runs = line["runs"]
             cx = ox + line["cx"]
             y0 = oy + line["y_top"]
+            # a compound balloon sizes each LOBE for its own balloon, so a
+            # line may carry its own size/tracking; otherwise the entry's
+            size = line.get("font_px", b["font_px"])
+            lh = line.get("line_height", b["line_height"])
+            track = line.get("track", b.get("track", 0.0))
             if len(runs) == 1:
                 st, txt = runs[0]
-                lyr = make_text_layer(img, txt, st, size, color)
+                lyr = make_text_layer(img, txt, st, size, color, track)
                 pdb.gimp_image_reorder_item(img, lyr, bgroup, 0)
                 pdb.gimp_layer_set_offsets(
                     lyr, int(round(cx - lyr.width / 2.0)),
@@ -126,7 +137,7 @@ for stem in sorted(layout.keys()):
                 sp = sw_cache[key]
                 lyrs = []
                 for st, txt in runs:
-                    lyr = make_text_layer(img, txt, st, size, color)
+                    lyr = make_text_layer(img, txt, st, size, color, track)
                     pdb.gimp_image_reorder_item(img, lyr, bgroup, 0)
                     lyrs.append(lyr)
                 total = sum(l.width for l in lyrs) + sp * (len(lyrs) - 1)
