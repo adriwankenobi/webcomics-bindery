@@ -18,6 +18,10 @@ import sys
 REPO = Path(__file__).resolve().parent.parent
 COMIC = BOOK_PIN = WORK = PAGES_DIR = BUB = None
 TYPO_FIXES, LAYOUT_OVERRIDES = [], {}
+# caption boxes found from their drawn frame (`auto_caption_boxes`), per
+# page: {"<short> bNN": {"box": ...}} and {stem: entries inside a box}
+AUTO_OVERRIDES, AUTO_MEMBERS = {}, {}
+_DEBUG_LOBES = False
 
 
 def configure(comic, book_pin=None):
@@ -607,9 +611,11 @@ def mask_lobes(mask, ox, oy, nlobes):
                 break
             out.append(rows)
         if len(out) == nlobes:
-            # reading order: top to bottom, then left to right
-            out.sort(key=lambda r: (min(r), min(v[0] for v in r.values())))
-            return out
+            # reading order: left to right where two lobes share most of
+            # their height, top to bottom otherwise (reading_order)
+            ex = [(min(v[0] for v in r.values()), min(r),
+                   max(v[1] for v in r.values()), max(r)) for r in out]
+            return [out[i] for i in reading_order(ex)]
     return None
 
 
@@ -693,6 +699,10 @@ def lobe_bands(p):
     nparas = len(p["paras"]) + 1
     if p["b"]["kind"] != "bubble" or nparas < 2:
         return None, False
+    # balloons found from their own lettering already ARE the lobes, in
+    # reading order; a waist cut of their union would re-order them by row
+    if p.get("auto_lobes") and p.get("lobes") and len(p["lobes"]) == nparas:
+        return p["lobes"], True
     bands = find_bands(p["rows"], nparas)
     if bands is not None:
         return bands, False
@@ -1210,44 +1220,405 @@ def lobes_from_rects(img, rects, bbox):
             dark, np.ones(dark.shape, np.uint8), seed, img=reg))
         if not (0.10 <= inter.mean() <= 0.92):
             return None             # the flood escaped, or found nothing
-        rows = {}
-        for ry in range(rh):
-            run = widest_run(inter[ry])
-            if run is None:
-                continue
-            gx0, gx1 = rx0 + run[0], rx0 + run[1]
-            rows[ry0 + ry] = (gx0, gx1)
-            a, b = max(gx0, x) - x, min(gx1, x + w) - x
-            if 0 <= ry0 + ry - y < h and b > a:
-                mask[ry0 + ry - y, a:b] = 1
-        if len(rows) < 12:
+        got = interior_lobe(reg, inter, rx0, ry0, bbox, mask)
+        if got is None:
             return None
-        lobes.append(rows)
-        # this lobe on its own: its interior's box, and the original ink
-        # inside that interior as its block
-        iy, ix = np.nonzero(inter)
-        lx0, ly0 = rx0 + int(ix.min()), ry0 + int(iy.min())
-        lx1, ly1 = rx0 + int(ix.max()) + 1, ry0 + int(iy.max()) + 1
-        sub = inter[ly0 - ry0:ly1 - ry0, lx0 - rx0:lx1 - rx0]
-        ink = (reg[ly0 - ry0:ly1 - ry0,
-                   lx0 - rx0:lx1 - rx0].min(axis=2) <= DARK_MAX) & (sub > 0)
-        nk, _, stk, _ = cv2.connectedComponentsWithStats(
-            ink.astype(np.uint8), 8)
-        sel = [i for i in range(1, nk)
-               if 9 <= stk[i, 3] <= 48 and stk[i, 4] >= 8]
-        if sel:
-            bx0 = lx0 + min(stk[i, 0] for i in sel)
-            by0 = ly0 + min(stk[i, 1] for i in sel)
-            bx1 = lx0 + max(stk[i, 0] + stk[i, 2] for i in sel)
-            by1 = ly0 + max(stk[i, 1] + stk[i, 3] for i in sel)
-        else:                       # no lettering found: the interior itself
-            bx0, by0, bx1, by1 = lx0, ly0, lx1, ly1
-        jobs.append(([lx0, ly0, lx1 - lx0, ly1 - ly0],
-                     [bx0, by0, bx1 - bx0, by1 - by0],
-                     sub.astype(np.uint8)))
+        lobes.append(got[0])
+        jobs.append(got[1])
     if len(lobes) != len(rects):
         return None
     return mask, lobes, jobs
+
+
+def _box_gap(a, c):
+    dx = max(0, max(a[0], c[0]) - min(a[0] + a[2], c[0] + c[2]))
+    dy = max(0, max(a[1], c[1]) - min(a[1] + a[3], c[1] + c[3]))
+    return (dx * dx + dy * dy) ** 0.5
+
+
+def letter_groups(boxes, n):
+    """Split letter boxes into `n` paragraphs at the widest gaps.
+
+    A minimum spanning tree over the gaps between letters, cut at its
+    longest edges — but only where both sides keep real lettering: a lone
+    speck of ink far from the text is the longest edge of all, and cutting
+    it off "splits" 2-030-2's two balloons into the whole text and one dot.
+    Specks then join the nearest group. Returns n lists of boxes, or None."""
+    m = len(boxes)
+    minsz = max(4, int(0.08 * m))
+    if m < n * minsz:
+        return None
+    edges = sorted((_box_gap(boxes[i], boxes[j]), i, j)
+                   for i in range(m) for j in range(i + 1, m))
+    par = list(range(m))
+
+    def find(i):
+        while par[i] != i:
+            par[i] = par[par[i]]
+            i = par[i]
+        return i
+    adj = {i: set() for i in range(m)}
+    mst = []
+    for g, i, j in edges:
+        a, c = find(i), find(j)
+        if a != c:
+            par[a] = c
+            mst.append((g, i, j))
+            adj[i].add(j)
+            adj[j].add(i)
+
+    def comp(s0):
+        seen, st = {s0}, [s0]
+        while st:
+            u = st.pop()
+            for v in adj[u]:
+                if v not in seen:
+                    seen.add(v)
+                    st.append(v)
+        return seen
+    for _ in range(n - 1):
+        for g, i, j in sorted(mst, reverse=True):
+            if j not in adj[i]:
+                continue
+            adj[i].discard(j)
+            adj[j].discard(i)
+            if len(comp(i)) >= minsz and len(comp(j)) >= minsz:
+                break
+            adj[i].add(j)
+            adj[j].add(i)
+        else:
+            return None
+    groups, seen = [], set()
+    for i in range(m):
+        if i not in seen:
+            c = comp(i)
+            seen |= c
+            groups.append([boxes[t] for t in sorted(c)])
+    big = [g for g in groups if len(g) >= minsz]
+    if len(big) != n:
+        return None
+    for g in groups:
+        if len(g) < minsz:
+            for bb in g:
+                min(big, key=lambda G: min(_box_gap(bb, o)
+                                           for o in G)).append(bb)
+    return big
+
+
+def _extent(g):
+    return (min(b[0] for b in g), min(b[1] for b in g),
+            max(b[0] + b[2] for b in g), max(b[1] + b[3] for b in g))
+
+
+def side_by_side(a, c):
+    """Two text extents (x0, y0, x1, y1) that share most of their height —
+    read left to right, not top to bottom."""
+    ov = min(a[3], c[3]) - max(a[1], c[1])
+    return ov > 0.3 * min(a[3] - a[1], c[3] - c[1])
+
+
+def reading_order(exts):
+    """Indices of text extents in reading order: left before right where
+    two sit side by side, top before bottom otherwise.
+
+    Sorting on the top row first (mask_lobes used to) swaps two balloons
+    side by side whenever the right one's top is a few px higher: p2-042,
+    p2-052, p3-031 and p3-032 all printed each balloon's text in the
+    other."""
+    import functools
+
+    def cmp(i, j):
+        a, c = exts[i], exts[j]
+        if side_by_side(a, c):
+            return -1 if a[0] < c[0] else 1
+        return -1 if a[1] < c[1] else 1
+    return sorted(range(len(exts)), key=functools.cmp_to_key(cmp))
+
+
+def block_letters(img, block, within=None, origin=(0, 0)):
+    """Letter-sized ink pieces lying WHOLLY inside `block`, as page boxes.
+
+    Wholly inside: clipped to the block, a balloon's outline breaks into
+    short arcs that pass for letters, and 2-030-2's block corner took one —
+    the cleaner then repainted the outline as a white tab. `within` (in the
+    frame starting at `origin`) bounds the ink to a mask."""
+    bx, by, bw, bh = block
+    X0, Y0 = max(0, bx - 60), max(0, by - 60)
+    reg = img[Y0:by + bh + 60, X0:bx + bw + 60]
+    ink = reg.min(axis=2) <= DARK_MAX
+    if within is not None:
+        ox, oy = origin
+        m = np.zeros(ink.shape, bool)
+        ys0, ys1 = max(Y0, oy), min(Y0 + ink.shape[0], oy + within.shape[0])
+        xs0, xs1 = max(X0, ox), min(X0 + ink.shape[1], ox + within.shape[1])
+        if ys1 > ys0 and xs1 > xs0:
+            m[ys0 - Y0:ys1 - Y0, xs0 - X0:xs1 - X0] = \
+                within[ys0 - oy:ys1 - oy, xs0 - ox:xs1 - ox]
+        ink &= m
+    k, _, st, _ = cv2.connectedComponentsWithStats(ink.astype(np.uint8), 8)
+    return [(X0 + int(st[i, 0]), Y0 + int(st[i, 1]),
+             int(st[i, 2]), int(st[i, 3])) for i in range(1, k)
+            if 9 <= st[i, 3] <= 48 and st[i, 2] <= 130 and st[i, 4] >= 8
+            and X0 + st[i, 0] >= bx - 2 and Y0 + st[i, 1] >= by - 2
+            and X0 + st[i, 0] + st[i, 2] <= bx + bw + 2
+            and Y0 + st[i, 1] + st[i, 3] <= by + bh + 2]
+
+
+def geodesic_owner(region, seeds, nlab):
+    """Label every pixel of `region` with the seed label nearest to it
+    WITHIN the region: the labels grow outward from their seeds one ring
+    at a time, never leaving the region, so two balloons joined by a neck
+    meet at the neck instead of along a straight line across one of them.
+    Pixels no seed can reach stay 0."""
+    owner = np.where(region, seeds, 0).astype(np.int32)
+    k3 = np.ones((3, 3), np.uint8)
+    reg = region.astype(bool)
+    while True:
+        free = reg & (owner == 0)
+        if not free.any():
+            break
+        grew = False
+        for t in range(1, nlab + 1):
+            g = cv2.dilate((owner == t).astype(np.uint8), k3) > 0
+            g &= free
+            if g.any():
+                owner[g] = t
+                free &= ~g
+                grew = True
+        if not grew:
+            break
+    return owner
+
+
+def letter_lobes(img, b, mask, n, others=(), paras=None):
+    """The balloon(s) of an entry, found from the ORIGINAL LETTERING.
+
+    Detection returns two balloons side by side as one entry, and from the
+    mask alone the fit cannot always tell them apart: the distance-
+    transform peaks miss a balloon much smaller than its neighbour (4 of
+    11 such entries in book 3 did not split at all and printed one block of
+    text across both), the lobes came back in the wrong order whenever the
+    right balloon's top sat a few px higher, and a mask that had leaked
+    across the panel (2-030-2) was cleaned as one region — both outlines
+    and the panel's colour went with it. And an entry can lose half its
+    own balloon to a neighbour it is joined to (4-024 b05: a rectangle over
+    the last two lines, the first line left standing under the new text).
+
+    The letterer says which balloon is which. His letters split at the
+    widest gaps into one group per paragraph (`letter_groups`), the groups
+    read in comic order (`reading_order`), and each group's balloon is the
+    walled flood out from its own letters — the same flood the `lobes`
+    override seeds from a hand-measured rectangle. Where floods meet —
+    balloons joined with no outline between them, this entry's or a
+    neighbour's (`others`, their blocks) — every pixel goes to the
+    lettering nearest it, detection's seam_split rule.
+
+    Used only where the existing path demonstrably fails: paragraphs side
+    by side, or a detection mask well past (leaked) or well under
+    (truncated) the balloons the lettering is in. Stacked lobes are found
+    reliably from the waist of the row profile, and the books already
+    shipped were approved on that. Returns what lobes_from_rects returns,
+    or None."""
+    x, y, w, h = b["bbox"]
+    H, W = img.shape[:2]
+    bx, by, bw, bh = b["block"]
+    mfill = fill_holes(mask > 0)
+    boxes = block_letters(img, b["block"], mfill, (x, y))
+    groups = letter_groups(boxes, n)
+    if groups is None:
+        return None
+    exts = [_extent(g) for g in groups]
+    beside = any(side_by_side(exts[i], exts[j])
+                 for i in range(n) for j in range(i + 1, n))
+    groups = [groups[i] for i in reading_order(exts)]
+    exts = [_extent(g) for g in groups]
+    # each group must be about as long as the paragraph it will carry: a
+    # transcript whose paragraphs are not this balloon's (1-100 b03 repeats
+    # its neighbour's "ADELANTE:") would otherwise split one text in two
+    if paras is not None and len(paras) == n and n > 1:
+        dens = [len(g) / max(1, len(re.sub(r"[\s*]", "", t)))
+                for g, t in zip(groups, paras)]
+        if max(dens) > 2.5 * min(dens):
+            return None
+    # the flood window: the entry AND its block (4-024 b05's block starts
+    # 35px above a mask that lost its first line), and any neighbour whose
+    # block reaches into it, plus room for a balloon the mask cut (a
+    # balloon's arc can rise 30px past its first line: 4-024 b05's did)
+    P = 60
+    X0, Y0 = max(0, min(x, bx) - P), max(0, min(y, by) - P)
+    X1 = min(W, max(x + w, bx + bw) + P)
+    Y1 = min(H, max(y + h, by + bh) + P)
+    rivals = [o for o in others
+              if o[0] < X1 and o[0] + o[2] > X0
+              and o[1] < Y1 and o[1] + o[3] > Y0]
+    for (ox, oy, ow, oh) in rivals:
+        X0, Y0 = max(0, min(X0, ox - P)), max(0, min(Y0, oy - P))
+        X1, Y1 = min(W, max(X1, ox + ow + P)), min(H, max(Y1, oy + oh + P))
+    win = img[Y0:Y1, X0:X1]
+    dark = (win.min(axis=2) <= DARK_MAX - 20).astype(np.uint8)
+    floods = []
+    for (ex0, ey0, ex1, ey1) in exts:
+        f = fill_holes(bubble_interior(
+            dark, np.ones(dark.shape, np.uint8),
+            (ex0 - X0, ey0 - Y0, ex1 - X0, ey1 - Y0), img=win))
+        if not f.any():
+            return None
+        floods.append(f)
+    # the flood's wall is the raw ink, so a letter within a few px of the
+    # outline is welded to it and left OUT of the interior — and the
+    # cleaner is confined to the mask, so 2-030-2's first and last lines
+    # survived as fragments under the new text. Each lobe owns its
+    # letters, bounded by what detection's mask holds.
+    mwin = np.zeros(dark.shape, bool)
+    mwin[y - Y0:y - Y0 + h, x - X0:x - X0 + w] = mfill
+    for f, g in zip(floods, groups):
+        for (lx, ly, lw, lh) in g:
+            sl = (slice(max(0, ly - Y0 - 2), ly - Y0 + lh + 2),
+                  slice(max(0, lx - X0 - 2), lx - X0 + lw + 2))
+            f[sl] |= mwin[sl]
+    # where floods meet, the nearest LETTERING owns the pixel — nearest
+    # INSIDE the fill (geodesic_owner): straight-line distance gave the big
+    # balloon's top corner to the small one's text beside it (4-024), and
+    # a watershed over the distance-to-edge handed the strip under
+    # 2-030-2's left text to the right balloon. ANY overlap counts — a
+    # flood the colour wall stopped partway into the next balloon shares
+    # only a sliver, and that sliver (the neighbour's first line) went to
+    # the wrong lobe and was never cleaned.
+    uni = np.zeros(dark.shape, bool)
+    for f in floods:
+        uni |= f
+    seeds = np.zeros(dark.shape, np.int32)
+    for t, g in enumerate(groups, 1):
+        for (lx, ly, lw, lh) in g:
+            seeds[max(0, ly - Y0):ly - Y0 + lh,
+                  max(0, lx - X0):lx - X0 + lw] = t
+    for (ox, oy, ow, oh) in rivals:
+        for (lx, ly, lw, lh) in block_letters(img, (ox, oy, ow, oh)):
+            if uni[min(dark.shape[0] - 1, max(0, ly - Y0 + lh // 2)),
+                   min(dark.shape[1] - 1, max(0, lx - X0 + lw // 2))]:
+                seeds[max(0, ly - Y0):ly - Y0 + lh,
+                      max(0, lx - X0):lx - X0 + lw] = n + 1
+    if n == 1 and not (seeds == 2).any():
+        inters = floods             # one balloon, no one else's letters
+    else:
+        owner = geodesic_owner(uni, seeds, n + 1)
+        inters = [f & (owner == t) for t, f in enumerate(floods, 1)]
+    found = np.zeros(dark.shape, bool)
+    for inter in inters:
+        ys, xs = np.nonzero(inter)
+        if not len(ys):
+            return None
+        if ((xs.min() == 0 and X0 > 0) or (ys.min() == 0 and Y0 > 0)
+                or (xs.max() == inter.shape[1] - 1 and X1 < W)
+                or (ys.max() == inter.shape[0] - 1 and Y1 < H)):
+            return None             # escaped: this is no balloon
+        found |= inter
+    # stacked lobes keep the waist cut — unless detection's mask LEAKED
+    # well past the balloons the lettering is in (2-030-2's covered the
+    # whole panel, and cleaning it painted out both outlines and the
+    # panel's colour), or covers well UNDER them (4-024 b05's)
+    inside = found[y - Y0:y - Y0 + h, x - X0:x - X0 + w].sum()
+    # (for a COMPOUND entry only: a single balloon's mask commonly runs
+    # 1.6-2.9x its walled interior and the ordinary path copes — re-finding
+    # those moved 14 approved balloons in book 2 for no gain)
+    leaked = n >= 2 and mfill.sum() > 1.4 * max(1, inside)
+    # ...and a mask that covers too little only counts when it cost the
+    # entry its OWN LETTERS (4-024 b05's first line lay outside it): a mask
+    # that merely stops short of the outline already holds the text, and
+    # re-finding those balloons moved approved type (6-133 b13 crowded the
+    # joined balloon below)
+    allb = block_letters(img, b["block"])
+    lost = sum(1 for (lx, ly, lw, lh) in allb
+               if not (0 <= ly + lh // 2 - y < h and 0 <= lx + lw // 2 - x < w
+                       and mfill[ly + lh // 2 - y, lx + lw // 2 - x]))
+    short = ((found & mwin).sum() < 0.6 * found.sum()
+             and lost >= max(3, 0.15 * len(allb)))
+    if _DEBUG_LOBES:
+        print(f"    letter_lobes n={n} beside={beside} "
+              f"mask/found={mfill.sum() / max(1, inside):.2f} "
+              f"lost={lost}/{len(allb)} short={short}")
+    if not (beside or leaked or short):
+        return None
+    out = np.zeros((h, w), np.uint8)
+    lobes, jobs = [], []
+    for inter in inters:
+        got = interior_lobe(win, inter, X0, Y0, b["bbox"], out)
+        if got is None:
+            return None
+        lobes.append(got[0])
+        jobs.append(got[1])
+    return out, lobes, jobs
+
+
+def gate_mask(img, stem, bi, b, default, pristine=None, texts=None,
+              bubbles=None):
+    """The mask a verification gate must measure for entry `bi`, in its
+    bbox frame: the region the fit actually used, not detection's PNG.
+
+    A `lobes` override and the balloons `letter_lobes` re-finds both
+    REPLACE detection's mask for the fit and the cleaner, and a gate that
+    reads the PNG measures a region nothing ever cleaned (p276 b04's covers
+    79% of a panel; letter_mask found 16 letter-shaped pieces of artwork in
+    it). The one home for that rule — leftover, welded and faint_scan all
+    call it. `pristine`, `texts` and `bubbles` let it re-find the balloons;
+    without them only the override is applied."""
+    ov = override_for(stem, bi)
+    if ov and "lobes" in ov:
+        got = lobes_from_rects(img, ov["lobes"], b["bbox"])
+        if got is not None:
+            return got[0].astype(bool)
+    if (pristine is not None and texts is not None and bubbles is not None
+            and b["kind"] == "bubble"):
+        npar = apply_fixes(texts[bi - 1]).count("\n\n") + 1
+        got = letter_lobes(pristine, b, default.astype(np.uint8), npar,
+                           [o["block"] for j, o in enumerate(bubbles, 1)
+                            if j != bi],
+                           apply_fixes(texts[bi - 1]).split("\n\n"))
+        if got is not None:
+            return got[0].astype(bool)
+    return default
+
+
+def interior_lobe(reg, inter, rx0, ry0, bbox, mask):
+    """One balloon's interior (`inter`, a boolean in the frame of `reg`,
+    whose top-left is page (rx0, ry0)) as a lobe: its page-coordinate row
+    dict, and its own cleaning job — the interior's box, with the original
+    ink inside the interior as its block. Paints the interior into `mask`
+    (the entry's bbox frame). None when it has under 12 usable rows."""
+    x, y, w, h = bbox
+    rh = inter.shape[0]
+    rows = {}
+    for ry in range(rh):
+        run = widest_run(inter[ry])
+        if run is None:
+            continue
+        gx0, gx1 = rx0 + run[0], rx0 + run[1]
+        rows[ry0 + ry] = (gx0, gx1)
+        a, b = max(gx0, x) - x, min(gx1, x + w) - x
+        if 0 <= ry0 + ry - y < h and b > a:
+            mask[ry0 + ry - y, a:b] = 1
+    if len(rows) < 12:
+        return None
+    iy, ix = np.nonzero(inter)
+    lx0, ly0 = rx0 + int(ix.min()), ry0 + int(iy.min())
+    lx1, ly1 = rx0 + int(ix.max()) + 1, ry0 + int(iy.max()) + 1
+    sub = inter[ly0 - ry0:ly1 - ry0, lx0 - rx0:lx1 - rx0]
+    ink = (reg[ly0 - ry0:ly1 - ry0,
+               lx0 - rx0:lx1 - rx0].min(axis=2) <= DARK_MAX) & (sub > 0)
+    nk, _, stk, _ = cv2.connectedComponentsWithStats(
+        ink.astype(np.uint8), 8)
+    sel = [i for i in range(1, nk)
+           if 9 <= stk[i, 3] <= 48 and stk[i, 4] >= 8]
+    if sel:
+        bx0 = lx0 + min(stk[i, 0] for i in sel)
+        by0 = ly0 + min(stk[i, 1] for i in sel)
+        bx1 = lx0 + max(stk[i, 0] + stk[i, 2] for i in sel)
+        by1 = ly0 + max(stk[i, 1] + stk[i, 3] for i in sel)
+    else:                           # no lettering found: the interior itself
+        bx0, by0, bx1, by1 = lx0, ly0, lx1, ly1
+    return rows, ([lx0, ly0, lx1 - lx0, ly1 - ly0],
+                  [bx0, by0, bx1 - bx0, by1 - by0],
+                  sub.astype(np.uint8))
 
 
 def repair_letter_bites(mask, page, origin, block_box, PAD=14):
@@ -1997,11 +2368,17 @@ def unfound_balloon(img, b):
 # corrections to the original lettering's own errors, applied at typeset
 # time (transcripts.json stays a verbatim record of the source). Per-comic
 # data: relettering/<comic>/typo_fixes.json, a list of [wrong, fixed] pairs
-def override_for(stem: str, bi: int):
+def override_key(stem: str, bi: int) -> str:
     import re as _re
     m = _re.match(r"^\D*(\d+)\b.*?(\d+(?:-\d)?)$", stem)
-    key = f"{m.group(1)}-{m.group(2)} b{bi:02d}" if m else f"{stem} b{bi:02d}"
-    return LAYOUT_OVERRIDES.get(key)
+    return f"{m.group(1)}-{m.group(2)} b{bi:02d}" if m else f"{stem} b{bi:02d}"
+
+
+def override_for(stem: str, bi: int):
+    # a hand-written override always wins over a box the frame finder
+    # derived (auto_caption_boxes skips any box with one)
+    key = override_key(stem, bi)
+    return LAYOUT_OVERRIDES.get(key) or AUTO_OVERRIDES.get(key)
 
 
 def apply_fixes(text):
@@ -2041,8 +2418,11 @@ def page_caption_boxes(bubbles, stem):
     # them: it cut p101's caption profile from 60 rows to 45 and the
     # fit then found no size at all.
     cap_box, cap_mem = {}, {}
+    framed = AUTO_MEMBERS.get(stem, set())
     for _bx, _mem in caption_boxes(bubbles,
                                    set(range(1, len(bubbles) + 1))):
+        if _mem & framed:
+            continue                # its frame was found: one whole box
         for _i in _mem:
             cap_box[_i] = _bx
             cap_mem[_i] = set(_mem)
@@ -2069,8 +2449,11 @@ def boxes_to_wipe(bubbles, stem, fitted):
     is what the rule was there for.
     """
     boxes = []
+    framed = AUTO_MEMBERS.get(stem, set())
     for _bx, _mem in caption_boxes(bubbles,
                                    set(range(1, len(bubbles) + 1))):
+        if _mem & framed:
+            continue                # wiped whole, as its framed box
         if not _mem & fitted:
             continue                # no member typeset: it keeps its own text
         if _mem <= fitted or all(is_strip(bubbles[i - 1]) for i in _mem):
@@ -2080,6 +2463,185 @@ def boxes_to_wipe(bubbles, stem, fitted):
         if ov and "box" in ov:
             boxes.append((tuple(ov["box"]), {bi}))
     return boxes
+
+
+def frame_box(img, block, bbox):
+    """The INNER edge (x0, y0, x1, y1) of the drawn rectangular frame
+    holding `block`, or None when the block sits in no such frame.
+
+    A gradient caption box defeats detection in more ways than the
+    tint+bubble split `caption_boxes` knows: the fill crosses LIGHT_MIN
+    wherever it likes, so a box comes back as one strip that misses its
+    pale lines (p2-004's "FORJADAS."), as three slivers side by side with
+    the top two lines in none of them (p2-066), or with one line cut in
+    two. The FRAME does not care about the fill. Flood the box's fill
+    from the lettering with only true black (dark in every channel, the
+    frame and the letters) as the wall: a yellow-to-white fill is one
+    region, and inside a drawn frame it comes back a near-perfect
+    rectangle. An oval balloon does not (0.55-0.78 against >=0.93), and
+    a box drawn on open art fails the ink and frame tests below.
+
+    The window grows once when the flood reaches it, because a sliver's
+    block can be a small fraction of its box (p3-020: 79px of a 446px
+    box); a flood that still reaches it has escaped the box."""
+    for mx, my in ((260, 200), (700, 400)):
+        got = _frame_box(img, block, bbox, mx, my)
+        if got != "escaped":
+            return got
+    return None
+
+
+def _frame_box(img, block, bbox, mx, my):
+    H, W = img.shape[:2]
+    bx, by, bw, bh = block
+    X0, Y0 = max(0, min(bx, bbox[0]) - mx), max(0, min(by, bbox[1]) - my)
+    X1 = min(W, max(bx + bw, bbox[0] + bbox[2]) + mx)
+    Y1 = min(H, max(by + bh, bbox[1] + bbox[3]) + my)
+    if bw <= 0 or bh <= 0:
+        return None
+    reg = img[Y0:Y1, X0:X1]
+    dark = reg.max(axis=2) <= FRAME_MAX
+    _, lab = cv2.connectedComponents((~dark).astype(np.uint8), 4)
+    sub = lab[by - Y0:by + bh - Y0, bx - X0:bx + bw - X0]
+    vals, cnt = np.unique(sub[sub > 0], return_counts=True)
+    if not len(vals):
+        return None
+    comp = lab == vals[cnt.argmax()]
+    ys, xs = np.nonzero(comp)
+    x0, y0, x1, y1 = xs.min(), ys.min(), xs.max() + 1, ys.max() + 1
+    if ((x0 == 0 and X0 > 0) or (y0 == 0 and Y0 > 0)
+            or (x1 == reg.shape[1] and X1 < W)
+            or (y1 == reg.shape[0] and Y1 < H)):
+        return "escaped"
+    if x0 == 0 or y0 == 0 or x1 == reg.shape[1] or y1 == reg.shape[0]:
+        return None                 # runs off the page: no frame there
+    if x1 - x0 < 60 or y1 - y0 < 25:
+        return None
+    solid = fill_holes(comp)
+    if solid[y0:y1, x0:x1].mean() < 0.93:
+        return None                 # not a rectangle: a balloon
+    # everything dark inside the fill must be LETTERING: a drawn object
+    # taller than any line of type means this "box" is a panel of art
+    holes = (solid & ~comp)[y0:y1, x0:x1].astype(np.uint8)
+    k, _, st, _ = cv2.connectedComponentsWithStats(holes, 8)
+    if any(st[i, 3] > 70 for i in range(1, k)):
+        return None
+    # and a frame really is drawn round it, on all four sides
+    sides = (dark[max(0, y0 - 6):y0, x0:x1].any(axis=0).mean(),
+             dark[y1:y1 + 6, x0:x1].any(axis=0).mean(),
+             dark[y0:y1, max(0, x0 - 6):x0].any(axis=1).mean(),
+             dark[y0:y1, x1:x1 + 6].any(axis=1).mean())
+    if min(sides) < 0.85:
+        return None
+    return (X0 + int(x0), Y0 + int(y0), X0 + int(x1), Y0 + int(y1))
+
+
+def auto_caption_boxes(stem, img, bubbles, texts):
+    """Find the page's caption boxes detection only part-found, and set
+    each as ONE block of type. Returns the page's texts as the fit must
+    read them.
+
+    A box qualifies when its frame is found (`frame_box`) AND detection
+    demonstrably lost part of it — at least 4 of the original letters
+    inside the frame are outside every member's mask and outside any
+    strip pair `caption_boxes` already wipes whole, or one line of it was
+    cut into pieces side by side. Anything less is left to the existing
+    machinery, which the shipped books were approved on: across both of
+    them this finds nothing that a hand-measured `box` override does not
+    already cover (and those overrides match the frames it finds to 2px).
+
+    The box is then exactly what a `box` override makes of it: the first
+    member with text carries the WHOLE box's text (the members' strings
+    in order — one string per strip, or the whole caption on one strip
+    and "" on the rest, read the same) and the box as its writing area,
+    the other members typeset nothing, and the box is wiped whole."""
+    out = list(texts)
+    AUTO_MEMBERS[stem] = set()
+    for key in [k for k in AUTO_OVERRIDES
+                if k.startswith(override_key(stem, 0)[:-2])]:
+        del AUTO_OVERRIDES[key]
+    found = {}
+    for bi, e in enumerate(bubbles, 1):
+        if e["kind"] == "dark":
+            continue
+        r = frame_box(img, e["block"], e["bbox"])
+        if r is not None:
+            found.setdefault(r, None)
+    pairs = [m for m in caption_boxes(bubbles,
+                                      set(range(1, len(bubbles) + 1)))
+             if len(m[1]) > 1]
+    for (x0, y0, x1, y1) in found:
+        mem = sorted(bi for bi, e in enumerate(bubbles, 1)
+                     if x0 <= e["block"][0] + e["block"][2] / 2 < x1
+                     and y0 <= e["block"][1] + e["block"][3] / 2 < y1)
+        carriers = [i for i in mem if apply_fixes(texts[i - 1]).strip()]
+        if not carriers or any(LAYOUT_OVERRIDES.get(override_key(stem, i))
+                               for i in mem):
+            continue
+        # what detection covered: the members' masks, and any strip pair
+        # the box pass wipes whole
+        cov = np.zeros((y1 - y0, x1 - x0), bool)
+        for i in mem:
+            x, y, w, h = bubbles[i - 1]["bbox"]
+            _mp = BUB / f"{stem}-b{i:02d}-mask.png"
+            if not _mp.is_file():
+                continue
+            mk = cv2.imread(str(_mp), cv2.IMREAD_GRAYSCALE) > 127
+            a0, b0 = max(x, x0), max(y, y0)
+            a1, b1 = min(x + w, x1), min(y + h, y1)
+            if a1 > a0 and b1 > b0:
+                cov[b0 - y0:b1 - y0, a0 - x0:a1 - x0] |= \
+                    mk[b0 - y:b1 - y, a0 - x:a1 - x]
+        for (p0, q0, p1, q1), pm in pairs:
+            if pm & set(mem):
+                a0, b0 = max(p0, x0), max(q0, y0)
+                a1, b1 = min(p1, x1), min(q1, y1)
+                if a1 > a0 and b1 > b0:
+                    cov[b0 - y0:b1 - y0, a0 - x0:a1 - x0] = True
+        cov = cv2.dilate(cov.astype(np.uint8), np.ones((7, 7), np.uint8)) > 0
+        ink = (img[y0:y1, x0:x1].max(axis=2) <= DARK_MAX).astype(np.uint8)
+        k, lab, st, _ = cv2.connectedComponentsWithStats(ink, 8)
+        lost = sum(1 for j in range(1, k)
+                   if 9 <= st[j, 3] <= 48 and st[j, 4] >= 8
+                   and cov[lab == j].mean() < 0.5)
+
+        def _vov(a, c):
+            ay, ah = bubbles[a - 1]["block"][1], bubbles[a - 1]["block"][3]
+            cy, ch = bubbles[c - 1]["block"][1], bubbles[c - 1]["block"][3]
+            return min(ay + ah, cy + ch) - max(ay, cy) > 0.5 * min(ah, ch)
+        side = any(_vov(a, c) for a in mem for c in mem if a < c)
+        # several entries in one frame that `caption_boxes` did not pair
+        # (p3-013: the last line alone in a strip of its own, set apart by
+        # a white band) are the same failure; a recognised strip pair is
+        # left to the box pass it already gets
+        loose = len(mem) > 1 and not any(set(mem) == pm for _, pm in pairs)
+        if lost < 4 and not side and not loose:
+            continue
+        # the letterer's own cap height, off every letter in the frame:
+        # read off a strip, or with the tint threshold, it comes out a size
+        # or two short (p2-014 read 19px for letters 21-25px tall)
+        caps = [st[j, 3] for j in range(1, k)
+                if 9 <= st[j, 3] <= 48 and st[j, 4] >= 8]
+        lead = carriers[0]
+        parts = [apply_fixes(texts[i - 1]).strip() for i in carriers]
+        # members that are each a whole sentence are separate lines of the
+        # box ("LA CAPITAL DE KIROS." / "19 ROTACIONES MÁS TARDE.", 5-006),
+        # and run together they read as one; strips cut mid-sentence are
+        # one paragraph
+        sep = ("\n" if all(re.search(r"[.!?…]\W*$", t.replace("*", ""))
+                           for t in parts[:-1]) else " ")
+        out[lead - 1] = sep.join(parts)
+        for i in mem:
+            if i != lead:
+                out[i - 1] = ""
+        AUTO_OVERRIDES[override_key(stem, lead)] = {
+            "box": [x0, y0, x1, y1],
+            "cap_h": float(np.median(caps)) if caps else 0.0}
+        AUTO_MEMBERS[stem] |= set(mem)
+        print(f"  {stem}: caption box {[x0, y0, x1, y1]} found from its "
+              f"frame — b{lead:02d} carries members {mem} "
+              f"({lost} letters outside detection)")
+    return out
 
 
 def prepare_bubble(stem, bi, b, img, texts, bubbles, cap_box, cap_mem):
@@ -2131,6 +2693,22 @@ def prepare_bubble(stem, bi, b, img, texts, bubbles, cap_box, cap_mem):
                   f"found no interior — ignored")
         else:
             mask, forced_lobes, lobe_jobs = got
+    # two balloons side by side returned as one entry: find each from its
+    # own lettering (letter_lobes), which also fixes their ORDER and
+    # replaces a mask that leaked across the panel
+    auto_lobes = False
+    _npar = apply_fixes(texts[bi - 1]).count("\n\n") + 1
+    if (forced_lobes is None and b["kind"] == "bubble"
+            and bi not in cap_members):
+        got = letter_lobes(img, b, mask, _npar,
+                           [o["block"] for j, o in enumerate(bubbles, 1)
+                            if j != bi],
+                           apply_fixes(texts[bi - 1]).split("\n\n"))
+        if got is not None:
+            mask, forced_lobes, lobe_jobs = got
+            auto_lobes = True
+            print(f"  {stem} b{bi:02d}: balloon(s) re-found from the "
+                  f"lettering ({len(forced_lobes)} lobe(s))")
     # give the balloon back what its own lettering cost the mask:
     # detection's barrier close welds a letter to an outline it comes
     # within 7px of, and the hole-fill then leaves a bite. Do it here,
@@ -2183,6 +2761,8 @@ def prepare_bubble(stem, bi, b, img, texts, bubbles, cap_box, cap_mem):
                                _cy1 - _cy0 - 2 * _ii],
                      bbox=[_cx0, _cy0, _cx1 - _cx0, _cy1 - _cy0])
     oldh = old_cap_height(img, b)
+    if sole_box and _ovm and _ovm.get("cap_h"):
+        oldh = _ovm["cap_h"]        # measured on the whole framed box
 
     # clip the row profile to the bubble's own box: detection can
     # follow a row run out past the bbox (the same artwork that
@@ -2343,6 +2923,7 @@ def prepare_bubble(stem, bi, b, img, texts, bubbles, cap_box, cap_mem):
             "oldh": oldh, "rows": rows, "rows_fit": rows_fit,
             "rows_raw": rows_raw, "allowed": allowed,
             "forced_lobes": forced_lobes, "lobe_jobs": lobe_jobs,
+            "auto_lobes": auto_lobes,
             "sole_box": sole_box, "bbox": (x, y, w, h),
             "jobs": jobs}
 
@@ -2366,6 +2947,7 @@ def collect_page(path, transcripts, all_pending):
     assert len(texts) == len(bubbles), \
         f"{path.stem}: {len(texts)} texts vs {len(bubbles)} bubbles"
     img = cv2.cvtColor(cv2.imread(str(path)), cv2.COLOR_BGR2RGB)
+    texts = auto_caption_boxes(path.stem, img, bubbles, texts)
     page_entries = []
     pending = []
     clean_jobs = []
@@ -2417,6 +2999,7 @@ def collect_page(path, transcripts, all_pending):
                 cy = _bcy
         pending.append({"bi": bi, "b": b, "words": words, "hard": hard,
                         "paras": paras, "sole_box": sole_box,
+                        "auto_lobes": prep["auto_lobes"],
                         "in_box": bi in cap_box,
                         "rows": (inset_rows(rows_fit or rows)
                                  if b["kind"] == "bubble" else rows),

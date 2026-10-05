@@ -45,7 +45,7 @@ for si, stem in enumerate(stems, 1):
         continue
     img = cv2.cvtColor(cv2.imread(src), cv2.COLOR_BGR2RGB)
     bubs = json.load(open(f"{R}/bubbles/{stem}.json"))
-    tr = TR[stem]
+    tr = F.auto_caption_boxes(stem, img, bubs, TR[stem])
     # the pages the fit actually typeset: a layout entry AND text to set
     fitted = {e["index"] for e in LAY.get(stem, [])
               if (tr[e["index"] - 1] if e["index"] - 1 < len(tr) else "")}

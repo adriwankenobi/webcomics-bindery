@@ -30,13 +30,11 @@ sys.argv = ["reletter_fit.py", C]
 import reletter_fit as _RF
 
 
-def gate_mask(img, stem, bi, b, default):
-    ov = _RF.override_for(stem, bi)
-    if ov and "lobes" in ov:
-        got = _RF.lobes_from_rects(img, ov["lobes"], b["bbox"])
-        if got is not None:
-            return got[0].astype(bool)
-    return default
+def gate_mask(img, stem, bi, b, default, pristine=None, texts=None,
+              bubbles=None):
+    # the one home for the rule is reletter_fit.gate_mask (the `lobes`
+    # override AND the balloons letter_lobes re-finds from the lettering)
+    return _RF.gate_mask(img, stem, bi, b, default, pristine, texts, bubbles)
 
 SP=os.environ.get('SP', '/tmp/relettering-qa')
 def nk(d): return {unicodedata.normalize('NFC',k):v for k,v in d.items()}
@@ -51,6 +49,9 @@ for stem in sorted(LAY):
     if not os.path.exists(p): continue
     img=cv2.cvtColor(cv2.imread(p), cv2.COLOR_BGR2RGB)
     lm=D.letter_mask(img)
+    _pp=f'{R}/pristine/{stem}.jpg'
+    PR=(cv2.cvtColor(cv2.imread(_pp), cv2.COLOR_BGR2RGB)
+        if os.path.exists(_pp) else None)
     bubs=json.load(open(f'{R}/bubbles/{stem}.json'))
     tr=TR[stem]; laid={e['index'] for e in LAY[stem]}
     ents={e['index']:e for e in LAY[stem]}
@@ -64,7 +65,7 @@ for stem in sorted(LAY):
         if os.path.exists(mp):
             m=cv2.imread(mp,cv2.IMREAD_GRAYSCALE)
             if m is not None and m.shape==(h,w):
-                mm=gate_mask(img, stem, bi, b, m>127)
+                mm=gate_mask(img, stem, bi, b, m>127, PR, tr, bubs)
                 reg[y:y+h,x:x+w]|=mm.astype(np.uint8)
         # the block CLIPPED to the bubble's own bbox: a block swallows the
         # balloon next door, and that neighbour's lettering is deliberately

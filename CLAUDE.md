@@ -402,6 +402,49 @@ session needs:
   frame and left a tab of fill colour on the artwork beside it. Do not pad
   the box outward to catch ink just outside it: that lets artwork into the
   region, the frame detection loses edges and the repaint spills further.
+- A CAPTION BOX IS FOUND FROM ITS FRAME (`frame_box` +
+  `auto_caption_boxes`), not from detection's strips. A gradient box
+  defeats detection in more shapes than the tint+bubble pair: one strip that
+  misses its pale lines, three slivers side by side with the top lines in
+  none (2-066), one line cut in two. Flood the fill from the lettering with
+  only TRUE BLACK (max channel <= FRAME_MAX) as the wall — yellow and white
+  are one region — and inside a drawn frame it comes back a rectangle
+  (>=0.93; ovals 0.55-0.78), with nothing taller than a line of type inside
+  and a frame on all four sides. It then becomes exactly a `box` override:
+  the first member with text carries the whole box's text, the rest set
+  nothing, the box is wiped whole, and its cap height is read off every
+  letter in the frame (off a strip with the tint threshold it read 19px for
+  letters 21-25px tall). It fires ONLY where detection demonstrably lost
+  part of the box (>=4 letters outside every member mask and every strip
+  pair, or a line cut side by side, or several members no pair covers):
+  across both shipped books it finds nothing a hand `box` override does not
+  already cover — and those overrides match its frames to 2px. A hand
+  override always wins.
+- BALLOONS FROM THE LETTERING (`letter_lobes`). Two balloons side by side in
+  ONE entry: 4 of 11 in book 3 did not split from the mask at all (the
+  distance-transform peaks miss a balloon much smaller than its
+  neighbour), 4 came back SWAPPED (lobes sorted on their top row, and the
+  right balloon's top sat a few px higher), and 2-030-2's mask had leaked
+  across the panel so the cleaning painted out both outlines and the
+  panel's colour. The letterer says which is which: split his letters at
+  the widest MST gaps into one group per paragraph (never cutting off a lone
+  speck), order them with `reading_order` (left before right when they share
+  most of their height), flood each balloon out from its own letters, and
+  where floods meet give each pixel to the lettering nearest it INSIDE the
+  fill (`geodesic_owner` — straight-line distance gave a big balloon's
+  corner to the small one beside it; a watershed on the distance-to-edge
+  handed the strip under one text to the other balloon). Neighbouring
+  entries' letters compete too (4-024 b05: a rectangle over half its text,
+  the joined neighbour had the rest). Letters are only ink pieces WHOLLY
+  inside the block — the block rectangle chops the outline into arcs that
+  pass for letters, and one got repainted as a white tab. Each lobe owns its
+  letters (welded to the outline, they fall outside the flood and survived
+  as fragments). Used only where the old path fails: paragraphs side by
+  side, a COMPOUND entry's mask well past (>1.4x) its balloons, or a mask
+  well under (<60%) the balloon that ALSO lost the entry's own letters. A
+  single balloon's mask commonly runs 1.6-2.9x its walled interior and the
+  ordinary path copes — re-finding those moved 14 approved book-2 balloons
+  for no gain, two of them worse (crowding a joined balloon).
 - Two cheap size metrics catch "text too small" before the user does:
   `new_cap_h < old_cap_h` (the balloon demonstrably had room — 18 bubbles
   book-wide, and every page the user reported was among the worst of them),

@@ -358,6 +358,34 @@ line box, and an arc forgives the rest) is refused at a drawn frame, which
 forgives nothing — 47px of box interior otherwise "fits" two 24px line
 boxes and the type prints across the rules.
 
+**Caption boxes found from their frame** (`frame_box`,
+`auto_caption_boxes`, run per page before anything is prepared — the fit's
+`collect_page` and `reclean_all.py` both call it). Detection splits a
+gradient box wherever the fill crosses `LIGHT_MIN`, which yields more shapes
+than the strip pair: one strip missing its pale lines, slivers side by side
+with the top lines in none, one line cut in two. The drawn frame does not
+care: a flood from the lettering walled only by true black returns a
+rectangle inside a frame (ovals do not), and the box is then handled
+exactly as a `box` override — one member carries the whole caption, the
+others set nothing, the box is wiped whole, and its cap height is measured
+on every letter inside the frame. It only fires where detection
+demonstrably lost part of the box; hand overrides win (`override_for`
+consults `AUTO_OVERRIDES` second), and strip pairs whose members are in a
+framed box are dropped from `caption_boxes`' results.
+
+**Balloons found from the lettering** (`letter_lobes`, in
+`prepare_bubble`). Where the mask cannot give the balloons — two paragraphs
+side by side in one entry, or a mask that leaked well past or stops well
+short of the balloons the lettering is in — the letterer's own letters are
+split into one group per paragraph (`letter_groups`, MST gaps), put in
+comic reading order (`reading_order`: left before right when two share most
+of their height; `mask_lobes` uses it too), and each balloon is the walled
+flood out from its own group. Where floods meet (balloons joined with no
+outline between them, including a neighbouring entry's), each pixel goes to
+the nearest lettering measured INSIDE the fill (`geodesic_owner`). The
+result is used like a `lobes` override (per-lobe rows, per-lobe cleaning
+jobs), and `lobe_bands` prefers it to the waist cut.
+
 **Per-bubble editorial overrides** — `relettering/<comic>/
 layout_overrides.json`, keyed `"<short> bNN"`: `{"size": N}` pins the font
 size (bypassing group caps), `{"anchor": "visual"}` forces the visual

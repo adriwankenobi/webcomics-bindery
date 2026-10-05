@@ -19,18 +19,17 @@ sys.argv = ["reletter_fit.py", C]
 import reletter_fit as _RF
 
 
-def gate_mask(img, stem, bi, b, default):
-    ov = _RF.override_for(stem, bi)
-    if ov and "lobes" in ov:
-        got = _RF.lobes_from_rects(img, ov["lobes"], b["bbox"])
-        if got is not None:
-            return got[0].astype(bool)
-    return default
+def gate_mask(img, stem, bi, b, default, pristine=None, texts=None,
+              bubbles=None):
+    # the one home for the rule is reletter_fit.gate_mask (the `lobes`
+    # override AND the balloons letter_lobes re-finds from the lettering)
+    return _RF.gate_mask(img, stem, bi, b, default, pristine, texts, bubbles)
 
 SP=os.environ.get('SP', '/tmp/relettering-qa')
 def nk(d): return {unicodedata.normalize('NFC',k):v for k,v in d.items()}
 nums={unicodedata.normalize('NFC',os.path.splitext(k)[0]):v for k,v in json.load(open(f'xcf/{C}/numbers.json')).items()}
-LAY=nk(json.load(open(f'{R}/layout.json')))
+LAY=nk(json.load(open(os.environ.get('LAYOUT', f'{R}/layout.json'))))
+TR=nk(json.load(open(f'{R}/transcripts.json')))
 SRC=os.environ.get('PAGES',f'upscaled/{C}')
 rows=[]
 for stem in sorted(LAY):
@@ -44,8 +43,12 @@ for stem in sorted(LAY):
         mp=f'{R}/bubbles/{stem}-b{bi:02d}-mask.png'
         if not os.path.exists(mp): continue
         x,y,w,h=b['bbox']
+        _pp=f'{R}/pristine/{stem}.jpg'
+        _pr=(cv2.cvtColor(cv2.imread(_pp),cv2.COLOR_BGR2RGB)
+             if os.path.exists(_pp) else None)
         mask=gate_mask(up, stem, bi, b,
-                       cv2.imread(mp,cv2.IMREAD_GRAYSCALE)>127)
+                       cv2.imread(mp,cv2.IMREAD_GRAYSCALE)>127,
+                       _pr, TR.get(stem), bubs)
         if mask.shape!=(h,w): continue
         cu=up[y:y+h,x:x+w].min(axis=2)
         inside=mask&(cu>180)
