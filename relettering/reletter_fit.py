@@ -17,7 +17,7 @@ import sys
 
 REPO = Path(__file__).resolve().parent.parent
 COMIC = BOOK_PIN = WORK = PAGES_DIR = BUB = None
-TYPO_FIXES, LAYOUT_OVERRIDES = [], {}
+TYPO_FIXES, LAYOUT_OVERRIDES, POLICY = [], {}, {}
 # caption boxes found from their drawn frame (`auto_caption_boxes`), per
 # page: {"<short> bNN": {"box": ...}} and {stem: entries inside a box}
 AUTO_OVERRIDES, AUTO_MEMBERS = {}, {}
@@ -39,6 +39,7 @@ def configure(comic, book_pin=None):
     it shipped with, so a re-fit only moves pages whose layout changed.
     """
     global COMIC, BOOK_PIN, WORK, PAGES_DIR, BUB, TYPO_FIXES, LAYOUT_OVERRIDES
+    global POLICY
     COMIC, BOOK_PIN = comic, book_pin
     WORK = REPO / "relettering" / comic
     PAGES_DIR = REPO / "upscaled" / comic
@@ -52,6 +53,11 @@ def configure(comic, book_pin=None):
     # for taste calls no global rule should be bent around
     _lo = WORK / "layout_overrides.json"
     LAYOUT_OVERRIDES = json.loads(_lo.read_text()) if _lo.is_file() else {}
+    # per-comic typographic POLICY (relettering/<comic>/fit_policy.json):
+    # choices the user made for one book that an approved book must not
+    # inherit — {"frame_pairs": true} sets a split caption pair as one box
+    _po = WORK / "fit_policy.json"
+    POLICY = json.loads(_po.read_text()) if _po.is_file() else {}
 
 
 # Auto-configure only when THIS is the program being run — directly, or by
@@ -86,6 +92,10 @@ MAX_PIECES = 3          # most fragments one hyphenated word may become
 TEXT_INSET = 5
 TRACK_MAX_FRAC = 0.05   # tightest tracking, as a fraction of the em
 FRAME_MAX = 90          # a drawn frame is dark in EVERY channel
+TAIL_APERTURE = 12      # px: an opening on the repair window's edge this
+                        # narrow is a tail's rim channel, not a leak
+FRAME_HELD = 0.85      # share of a frame's rows detection must cover, or
+                        # the frame becomes the box (auto_caption_boxes)
 # two strips of ONE caption box are cut from the same rectangle, so their x
 # ranges agree this closely (intersection over union). Measured book-wide:
 # the real pairs run 0.893-0.998, the false ones 0.716 and 0.769
@@ -93,6 +103,10 @@ X_AGREE = 0.85
 # how far a pixel's colour may stray from the balloon's own fill and still
 # count as that fill: the wall where no dark stroke separates balloon from page
 COLOUR_WALL = 55
+SIBLING_MIN_LETTERS = 4  # a neighbour's letters inside a mask that make
+                         # its text, not a stray piece (sibling_letter_box)
+FILL_TREND_MIN = 8     # levels a fill must depart from its row level by
+                        # before the repaint follows it (fill_trend)
 # a word shorter than this is never hyphenated: breaking it to buy a size or
 # two reads as a typo, and hyphenation exists only so one LONG word cannot
 # collapse a bubble
@@ -1117,6 +1131,34 @@ def fill_holes(m):
     return ((pad > 0) | (ff == 0))[1:-1, 1:-1]
 
 
+def fill_wall(dark, first, inblock, shift):
+    """How far a pixel's colour may shift from the fill and still be fill.
+
+    COLOUR_WALL, unless the letterer's own letters stand on a ground that
+    shifts further: a balloon that grades from a white glow to a blue rim
+    (an announcer's burst) has text right out to the blue, and the blue sits
+    56 levels of hue from the white the median reads as "the fill" — so the
+    wall cut the balloon's own rim off and the repaint, sampling only the
+    glow, painted the letters out there WHITE. The ground the letters sit on
+    is fill by definition, so the wall widens to cover it. A balloon whose
+    mask leaked onto pale sky keeps the plain wall: its letters stand on the
+    balloon's white, so the ground around them shifts by nothing."""
+    letters = np.zeros(dark.shape, np.uint8)
+    n, lab, st, _ = cv2.connectedComponentsWithStats(
+        ((dark > 0) & inblock).astype(np.uint8), 8)
+    for i in range(1, n):
+        if 9 <= st[i, 3] <= 48 and st[i, 2] <= 110 and st[i, 4] >= 8:
+            letters[lab == i] = 1
+    if not letters.any():
+        return COLOUR_WALL
+    ground = ((cv2.dilate(letters, np.ones((7, 7), np.uint8)) > 0)
+              & ~(cv2.dilate(letters, np.ones((3, 3), np.uint8)) > 0)
+              & first & (dark == 0))
+    if ground.sum() < 50:
+        return COLOUR_WALL
+    return max(COLOUR_WALL, float(np.percentile(shift[ground], 95)) + 10)
+
+
 def bubble_interior(dark, keep_ring, block_box, img=None):
     """The balloon's own fill: the light region inside the mask that holds
     the letterer's text block, walled in by the balloon outline.
@@ -1166,7 +1208,8 @@ def bubble_interior(dark, keep_ring, block_box, img=None):
     # skips them and they survive as hollow ghost letters. Dropping the
     # common luminance offset leaves only the hue change that marks the page.
     d = img.astype(np.int16) - fill.astype(np.int16)
-    near = (d.max(axis=2) - d.min(axis=2)) <= COLOUR_WALL
+    shift = d.max(axis=2) - d.min(axis=2)
+    near = shift <= fill_wall(dark, first, inblock, shift)
     walled = _grow(near)
     return first if walled is None else walled
 
@@ -1673,8 +1716,28 @@ def repair_letter_bites(mask, page, origin, block_box, PAD=14):
     free = bubble_interior(stroke, np.ones(big.shape, np.uint8),
                            (x0 + px0, y0 + py0, x1 + px0, y1 + py0), img=win)
     # what the mask and the drawn ink already close in (the ink threshold is
-    # the generous one: a pocket wall with a hole in it is not a pocket)
-    sealed = fill_holes((big > 0) | (win.min(axis=2) <= DARK_MAX))
+    # the generous one: a pocket wall with a hole in it is not a pocket).
+    # The mask stops a few px short of the outline, so a thin channel of fill
+    # runs round the rim between the two — and on along a TAIL that leaves
+    # the window, out through its edge. Every pocket on the rim then "reached
+    # the crop" and 2-053's line end, welded to the arc, was never given
+    # back. A leak leaves the window as what it is, the page — a wide
+    # opening — so a narrow opening on the window's edge is closed off.
+    # (Closing narrow passages EVERYWHERE instead re-admitted the very leaks
+    # this guard exists for: they escape through a narrow gap in the outline
+    # and then open out.)
+    closed = (big > 0) | (win.min(axis=2) <= DARK_MAX)
+    edge = np.zeros(closed.shape, bool)
+    for sl in ((0, slice(None)), (-1, slice(None)),
+               (slice(None), 0), (slice(None), -1)):
+        run = ~closed[sl]
+        d = np.diff(np.concatenate(([0], run.astype(np.int8), [0])))
+        for r0, r1 in zip(np.flatnonzero(d == 1), np.flatnonzero(d == -1)):
+            if r1 - r0 <= TAIL_APERTURE:
+                line = edge[sl]
+                line[r0:r1] = True
+                edge[sl] = line
+    sealed = fill_holes(closed | edge)
     add = np.zeros(big.shape, bool)
     add[y0 + py0:y1 + py0, x0 + px0:x1 + px0] = (
         fill_holes(free) & sealed)[y0 + py0:y1 + py0, x0 + px0:x1 + px0]
@@ -1882,14 +1945,30 @@ def clean_caption_box(img, box):
                         (25, 5))
     bg = background(minch).astype(np.int16)
     ink = minch.astype(np.int16) <= bg - 45
-    n, lab, st, _ = cv2.connectedComponentsWithStats(
-        ink.astype(np.uint8), 8)
+    # ...and on the MAX channel too. A saturated yellow fill has a blue
+    # channel down near the ink (89 against a letter's 65 on 3-018), so the
+    # min channel cannot tell the letters from the fill there and the end of
+    # a line survived the wipe. Black lettering is dark in
+    # every channel; the fill's strongest channel never is.
+    maxch = region.max(axis=2)
+    ink_max = (maxch.astype(np.int16)
+               <= background(maxch).astype(np.int16) - 45)
     span = max(w2, h2)
-    keep = np.zeros(ink.shape, bool)
-    for ci in range(1, n):
-        cw, ch, ca = st[ci, 2], st[ci, 3], st[ci, 4]
-        if max(cw, ch) >= 0.45 * span and ca <= 0.28 * max(1, cw * ch):
-            keep[lab == ci] = True              # the drawn frame / a rule
+
+    def curves(m):
+        n, lab, st, _ = cv2.connectedComponentsWithStats(m.astype(np.uint8), 8)
+        out = np.zeros(m.shape, bool)
+        for ci in range(1, n):
+            cw, ch, ca = st[ci, 2], st[ci, 3], st[ci, 4]
+            if max(cw, ch) >= 0.45 * span and ca <= 0.28 * max(1, cw * ch):
+                out[lab == ci] = True           # the drawn frame / a rule
+        return out
+    # Each test finds its own curves. On the saturated rows the min channel
+    # also turns up a long thin band of FILL, and a line end that touches it
+    # became one "curve" with it and was spared — so a band the min channel
+    # alone sees never spares what the max channel calls lettering.
+    keep = curves(ink_max) | (curves(ink) & ~ink_max)
+    ink |= ink_max
     # the drawn frame, found by its geometry rather than by looking like a
     # curve, and everything outside it left alone: the box rectangle runs
     # wide of the frame, so repainting the whole of it wiped the frame and
@@ -1996,6 +2075,50 @@ def clean_caption_box(img, box):
         bgc = np.clip(np.stack(est, axis=2), 0, 255).astype(np.uint8)
     region[sel] = bgc[sel]
     img[y0:y1, x0:x1] = region
+
+
+def fill_trend(region, good):
+    """The balloon's fill under its lettering, as a full (h, w, 3) uint8
+    estimate — or None when one level per row already describes it.
+
+    The bubble repaint gives each row ONE colour, its median: right for a
+    white balloon, and the only thing that keeps a hologram's horizontal
+    stripes. It is wrong for a fill that varies ALONG the row — an
+    announcer's pale-blue burst with a white glow in the middle and blue
+    edges — where every old line came back as a flat band too white for
+    the edges and too blue for the middle: bright streaks across the
+    balloon, and the letters at the blue ends repainted near-white, so they
+    read as white ghost lettering under the new text.
+
+    Such a fill is estimated in 2-D instead, from the fill visible around
+    the lettering (normalised convolution, widening until every pixel has
+    support): the gaps between lines carry the fill's profile right across
+    the text. The test is how far the fill strays from its own row median;
+    a fill that does not (white, striped) is left to the plain row median,
+    untouched.
+    """
+    h, w = good.shape
+    if good.sum() < 50:
+        return None
+    src = region.astype(np.float32)
+    dev = []
+    for ry in np.flatnonzero(good.any(axis=1)):
+        v = src[ry][good[ry]]
+        dev.append(np.abs(v - np.median(v, axis=0)).max(axis=1))
+    if np.percentile(np.concatenate(dev), 90) < FILL_TREND_MIN:
+        return None
+    k = good.astype(np.float32)
+    out = np.zeros_like(src)
+    done = np.zeros((h, w), bool)
+    for sigma in (6, 12, 24, 48, 96):
+        den = cv2.GaussianBlur(k, (0, 0), sigma)
+        num = cv2.GaussianBlur(src * k[..., None], (0, 0), sigma)
+        ok = ~done & (den > 0.02)
+        out[ok] = num[ok] / den[ok][:, None]
+        done |= ok
+    if not done.all():
+        out[~done] = np.median(src[good], axis=0)
+    return np.clip(out + 0.5, 0, 255).astype(np.uint8)
 
 
 def clean_bubble(img, b, mask, allowed_ys=None):
@@ -2210,13 +2333,23 @@ def clean_bubble(img, b, mask, allowed_ys=None):
         structure = cv2.dilate(((dark > 0) | soft).astype(np.uint8),
                                np.ones((5, 5), np.uint8)) > 0
         paint = interior | (ink > 0)
+        good_all = interior & ~structure
+        trend = fill_trend(region, good_all)
+        if trend is not None:
+            # a graded fill shows what a flat one hides: the counters of
+            # the old letters (enclosed, so outside the flood) kept their
+            # original pixels, which stood out as pale specks
+            paint = (paint | solid) & ~protect
         for ry in range(h):
             if allowed_ys is not None and (y + ry) not in allowed_ys:
                 continue
             sel = paint[ry] & halo[ry]
             if not sel.any():
                 continue
-            good = interior[ry] & ~structure[ry]
+            if trend is not None:
+                region[ry][sel] = trend[ry][sel]
+                continue
+            good = good_all[ry]
             med = (np.median(region[ry][good], axis=0) if good.any()
                    else np.array([255, 255, 255]))
             region[ry][sel] = med.astype(np.uint8)
@@ -2544,11 +2677,10 @@ def auto_caption_boxes(stem, img, bubbles, texts):
     A box qualifies when its frame is found (`frame_box`) AND detection
     demonstrably lost part of it — at least 4 of the original letters
     inside the frame are outside every member's mask and outside any
-    strip pair `caption_boxes` already wipes whole, or one line of it was
-    cut into pieces side by side. Anything less is left to the existing
-    machinery, which the shipped books were approved on: across both of
-    them this finds nothing that a hand-measured `box` override does not
-    already cover (and those overrides match the frames it finds to 2px).
+    strip pair `caption_boxes` already wipes whole, one line of it was
+    cut into pieces side by side, the entries cover under FRAME_HELD of
+    the frame's rows, or (per-comic policy) the frame holds a strip pair. Anything less is left to the existing machinery,
+    which the shipped books were approved on.
 
     The box is then exactly what a `box` override makes of it: the first
     member with text carries the WHOLE box's text (the members' strings
@@ -2615,7 +2747,26 @@ def auto_caption_boxes(stem, img, bubbles, texts):
         # a white band) are the same failure; a recognised strip pair is
         # left to the box pass it already gets
         loose = len(mem) > 1 and not any(set(mem) == pm for _, pm in pairs)
-        if lost < 4 and not side and not loose:
+        # A recognised strip PAIR is still two strips: each is sized in its
+        # own strip and the pair is capped at the original's size, so beside
+        # boxes that come through here it prints a size and a half smaller
+        # (3-003). Setting it as one block is a per-comic POLICY call
+        # (fit_policy.json "frame_pairs"): the pairs of an approved book
+        # were signed off at the original's size.
+        split = POLICY.get("frame_pairs", False) and len(mem) > 1
+        # detection can also find every letter and still lose the BOX: a
+        # graded fill stops the strip growing where the gradient turns pale,
+        # so the fit is handed a fraction of the frame's height (the strip
+        # held 69% of 4-034's rows) and the caption comes out small, while
+        # the cleaner, confined to the strip, reads white off the pale rows
+        # and paints a band across the box (3-011). Measured over the book,
+        # every box detection holds whole has >= 0.90 of its rows covered.
+        held = np.zeros(y1 - y0, bool)
+        for i in mem:
+            _, by_, _, bh_ = bubbles[i - 1]["bbox"]
+            held[max(0, by_ - y0):max(0, min(y1, by_ + bh_) - y0)] = True
+        partial = held.mean() < FRAME_HELD
+        if lost < 4 and not side and not loose and not split and not partial:
             continue
         # the letterer's own cap height, off every letter in the frame:
         # read off a strip, or with the tint threshold, it comes out a size
@@ -2641,6 +2792,52 @@ def auto_caption_boxes(stem, img, bubbles, texts):
         print(f"  {stem}: caption box {[x0, y0, x1, y1]} found from its "
               f"frame — b{lead:02d} carries members {mem} "
               f"({lost} letters outside detection)")
+    return out
+
+
+def sibling_letter_box(img, b, bi, mask, bubbles, pad=6):
+    """Page box (x0, y0, x1, y1) of the OTHER entries' letters that lie
+    inside this entry's mask and outside its own block, padded — or None.
+
+    A letter counts for a sibling when it lies wholly inside that sibling's
+    block (block_letters) and its centre is not inside this entry's own
+    block: two blocks can overlap, and a letter in both says nothing about
+    whose it is."""
+    x, y, w, h = b["bbox"]
+    bx, by, bw, bh = b["block"]
+    boxes = []
+    for j, o in enumerate(bubbles, 1):
+        if j == bi:
+            continue
+        ox, oy, ow, oh = o["block"]
+        if ox >= x + w or oy >= y + h or ox + ow <= x or oy + oh <= y:
+            continue
+        for lx, ly, lw, lh in block_letters(img, o["block"], within=mask,
+                                            origin=(x, y)):
+            cx, cy = lx + lw / 2.0, ly + lh / 2.0
+            if bx <= cx < bx + bw and by <= cy < by + bh:
+                continue
+            boxes.append((lx, ly, lx + lw, ly + lh))
+    if len(boxes) < SIBLING_MIN_LETTERS:
+        return None         # a stray piece of a neighbour's line, not text
+    return (min(q[0] for q in boxes) - pad, min(q[1] for q in boxes) - pad,
+            max(q[2] for q in boxes) + pad, max(q[3] for q in boxes) + pad)
+
+
+def cut_box(rows, box):
+    """Row profile with `box` taken out: each row it crosses keeps the wider
+    piece left beside it (a span is one x-range), and a row with nothing
+    left is dropped."""
+    x0, y0, x1, y1 = box
+    out = {}
+    for yy, (a, c) in rows.items():
+        if not (y0 <= yy < y1) or c <= x0 or a >= x1:
+            out[yy] = (a, c)
+            continue
+        left, right = (a, min(c, x0)), (max(a, x1), c)
+        best = max(left, right, key=lambda s: s[1] - s[0])
+        if best[1] - best[0] > 0:
+            out[yy] = best
     return out
 
 
@@ -2910,6 +3107,23 @@ def prepare_bubble(stem, bi, b, img, texts, bubbles, cap_box, cap_mem):
             # three lines sat 17px low in it.
             rows_fit = dict(cap_rows)
 
+    if (b["kind"] == "bubble" and forced_lobes is None
+            and bi not in cap_members and not (_ovm and "box" in _ovm)
+            and bi not in AUTO_MEMBERS.get(stem, ())):
+        # The writing area never includes a SIBLING'S lettering. Where two
+        # balloons join, one mask can run over the other's text (2-064 b10's
+        # covered the last three lines of the balloon above it), and the fit
+        # then used that stretch as room: b10's first line printed straight
+        # across b07's last one. Cut the box of the sibling's letters out of
+        # the profiles — the letters, not the sibling's block, which is a
+        # blob cluster and can reach over this balloon's own text.
+        sib = sibling_letter_box(img, b, bi, mask, bubbles)
+        if sib is not None:
+            rows = cut_box(rows, sib) or rows
+            if rows_fit:
+                rows_fit = cut_box(rows_fit, sib) or rows_fit
+            if rows_raw:
+                rows_raw = cut_box(rows_raw, sib) or rows_raw
     if lobe_jobs:
         # two balloons are cleaned as two: this entry's block spans
         # both and the artwork between them

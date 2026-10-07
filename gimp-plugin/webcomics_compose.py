@@ -23,56 +23,52 @@ def _is_image_file(fname):
     return os.path.splitext(fname)[1].lower() in IMAGE_EXTS
 
 
-def _add_page_number(img, number, art_bottom, strip_bottom, bg_rgb=None):
-    """Page number inside a circle, centered in the reserved strip between
-    the artwork bottom and the trim line. The circle is filled with the
-    page's background color; number and ring are black on light backgrounds,
-    white on dark ones."""
+PAGE_NUMBER_FONT = "Sans Bold"
+PAGE_NUMBER_PX = 28
+
+
+def _ink_rows(img, layer):
+    """Top and bottom (exclusive) rows of a layer's ink, relative to it."""
+    pdb.gimp_image_select_item(img, CHANNEL_OP_REPLACE, layer)
+    _, _, y0, _, y1 = pdb.gimp_selection_bounds(img)
+    pdb.gimp_selection_none(img)
+    oy = pdb.gimp_drawable_offsets(layer)[1]
+    return y0 - oy, y1 - oy
+
+
+def _add_page_number(img, number, art_bottom, safety_bottom, bg_rgb=None):
+    """Plain page number, its INK centred in the gap between the artwork
+    bottom and the safety line. No ring: the printer's cut can bite into the
+    safety band below that line, and a hard-edged ring shows even a small
+    drift as a clipped circle. Black on light backgrounds, white on dark
+    ones; kept as an editable text layer."""
     if bg_rgb is None:
         bg_rgb = (255, 255, 255)
     luma = 0.299 * bg_rgb[0] + 0.587 * bg_rgb[1] + 0.114 * bg_rgb[2]
     ink = (0, 0, 0) if luma >= 128 else (255, 255, 255)
-    canvas_w = pdb.gimp_image_width(img)
     text = str(number)
-    font = "Sans Bold"
-    strip_h = max(24, strip_bottom - art_bottom)
-    d = min(64, strip_h - 8)
-    size = max(12, int(d * 0.45))
-    tw, th, asc, desc = pdb.gimp_text_get_extents_fontname(text, size, 0, font)
-    while tw > d - 12 and size > 10:  # shrink until the number fits the ring
+    gap = max(12, safety_bottom - art_bottom)
+    size = PAGE_NUMBER_PX
+    while True:
+        layer = pdb.gimp_text_layer_new(img, text, PAGE_NUMBER_FONT, size,
+                                        UNIT_PIXEL)
+        pdb.gimp_image_insert_layer(img, layer, None, 0)
+        top, bottom = _ink_rows(img, layer)
+        if bottom - top <= gap * 0.6 or size <= 10:  # clear of both edges
+            break
+        pdb.gimp_image_remove_layer(img, layer)
         size -= 2
-        tw, th, asc, desc = pdb.gimp_text_get_extents_fontname(text, size, 0, font)
-    cx = canvas_w // 2
-    cy = (art_bottom + strip_bottom) // 2
-
-    badge = pdb.gimp_layer_new(img, img.width, img.height, RGBA_IMAGE,
-                               "Page number", 100, LAYER_MODE_NORMAL)
-    pdb.gimp_image_insert_layer(img, badge, None, 0)
-    pdb.gimp_image_set_active_layer(img, badge)
-    old_fg = pdb.gimp_context_get_foreground()
-    pdb.gimp_image_select_ellipse(img, CHANNEL_OP_REPLACE,
-                                  cx - d // 2, cy - d // 2, d, d)
-    pdb.gimp_context_set_foreground(ink)
-    pdb.gimp_edit_fill(badge, FILL_FOREGROUND)
-    pdb.gimp_selection_shrink(img, 3)
-    pdb.gimp_context_set_foreground(tuple(bg_rgb))
-    pdb.gimp_edit_fill(badge, FILL_FOREGROUND)
-    pdb.gimp_selection_none(img)
-
-    text_layer = pdb.gimp_text_layer_new(img, text, font, size, UNIT_PIXEL)
-    pdb.gimp_image_insert_layer(img, text_layer, None, 0)
-    pdb.gimp_text_layer_set_color(text_layer, ink)
-    pdb.gimp_layer_set_offsets(text_layer,
-                               cx - text_layer.width // 2,
-                               cy - text_layer.height // 2)
-    merged = pdb.gimp_image_merge_down(img, text_layer, EXPAND_AS_NECESSARY)
-    pdb.gimp_item_set_name(merged, "Page number")
-    pdb.gimp_context_set_foreground(old_fg)
-    return merged
+    pdb.gimp_item_set_name(layer, "Page number")
+    pdb.gimp_text_layer_set_color(layer, ink)
+    cx = pdb.gimp_image_width(img) // 2
+    cy = (art_bottom + safety_bottom) // 2
+    pdb.gimp_layer_set_offsets(layer, cx - layer.width // 2,
+                               cy - (top + bottom) // 2)
+    return layer
 
 
 def _compose_one(in_path, template_xcf, xcf_path, pdf_path,
-                 number=None, art_bottom=0, strip_bottom=0, bg_rgb=None):
+                 number=None, art_bottom=0, safety_bottom=0, bg_rgb=None):
     # 1) Load a fresh copy of the template
     img = pdb.gimp_file_load(template_xcf, template_xcf)
 
@@ -133,9 +129,9 @@ def _compose_one(in_path, template_xcf, xcf_path, pdf_path,
     sys.stdout.write("  background RGB %d,%d,%d\n" % tuple(bg_rgb))
     sys.stdout.flush()
 
-    # Page number badge (story pages only; covers/indexes/art pages get none)
+    # Page number (story pages only; covers/indexes/art pages get none)
     if number is not None:
-        _add_page_number(img, number, art_bottom, strip_bottom, bg_rgb)
+        _add_page_number(img, number, art_bottom, safety_bottom, bg_rgb)
 
     # 5) Save XCF first (keeps all layers, hidden template ones included)
     pdb.gimp_xcf_save(0, img, layer, xcf_path, xcf_path)
@@ -148,6 +144,34 @@ def _compose_one(in_path, template_xcf, xcf_path, pdf_path,
     pdb.gimp_image_delete(img)
 
 
+def _read_numbers_file(numbers_file):
+    """numbers file: header lines "ART_BOTTOM <y>", "SAFETY_BOTTOM <y>" and
+    "STRIP_BOTTOM <y>", then "<filename>\t<number or ->\t<r,g,b or ->" per
+    page (number: only pages that get one; r,g,b: paper color measured from
+    the source image). Returns (numbers, bg_colors, art_bottom,
+    safety_bottom)."""
+    numbers = {}
+    bg_colors = {}
+    header = {}
+    if numbers_file and os.path.isfile(numbers_file):
+        with open(numbers_file) as fh:
+            for line in fh:
+                line = line.rstrip("\n")
+                if "\t" in line:
+                    fname, num, rgb = line.split("\t")
+                    if num != "-":
+                        numbers[fname] = int(num)
+                    if rgb != "-":
+                        bg_colors[fname] = tuple(int(v) for v in rgb.split(","))
+                elif line.split()[:1]:
+                    header[line.split()[0]] = int(line.split()[1])
+    art_bottom = header.get("ART_BOTTOM", 0)
+    # older metadata files carry no safety line: the strip bottom (trim) is
+    # the next-best lower edge
+    safety_bottom = header.get("SAFETY_BOTTOM", header.get("STRIP_BOTTOM", 0))
+    return numbers, bg_colors, art_bottom, safety_bottom
+
+
 def webcomics_compose(in_dir, template_xcf, xcf_dir, pdf_dir,
                          numbers_file=""):
     if not os.path.isdir(in_dir):
@@ -157,26 +181,8 @@ def webcomics_compose(in_dir, template_xcf, xcf_dir, pdf_dir,
         _log("ERROR: template not found: %s" % template_xcf)
         return
 
-    # numbers file: header lines "ART_BOTTOM <y>" and "STRIP_BOTTOM <y>",
-    # then "<filename>\t<number or ->\t<r,g,b or ->" per page (number: only
-    # pages that get one; r,g,b: paper color measured from the source image)
-    numbers = {}
-    bg_colors = {}
-    art_bottom = strip_bottom = 0
-    if numbers_file and os.path.isfile(numbers_file):
-        with open(numbers_file) as fh:
-            for line in fh:
-                line = line.rstrip("\n")
-                if line.startswith("ART_BOTTOM"):
-                    art_bottom = int(line.split()[1])
-                elif line.startswith("STRIP_BOTTOM"):
-                    strip_bottom = int(line.split()[1])
-                elif "\t" in line:
-                    fname, num, rgb = line.split("\t")
-                    if num != "-":
-                        numbers[fname] = int(num)
-                    if rgb != "-":
-                        bg_colors[fname] = tuple(int(v) for v in rgb.split(","))
+    numbers, bg_colors, art_bottom, safety_bottom = \
+        _read_numbers_file(numbers_file)
     for d in (xcf_dir, pdf_dir):
         if not os.path.isdir(d):
             os.makedirs(d)
@@ -204,7 +210,7 @@ def webcomics_compose(in_dir, template_xcf, xcf_dir, pdf_dir,
         _log("COMPOSE %d/%d: %s" % (i + 1, len(files), fname))
         try:
             _compose_one(in_path, template_xcf, xcf_path, pdf_path,
-                         numbers.get(fname), art_bottom, strip_bottom,
+                         numbers.get(fname), art_bottom, safety_bottom,
                          bg_colors.get(fname))
             done += 1
         except Exception as e:
@@ -233,5 +239,6 @@ register(
     [],
     webcomics_compose
 )
+
 
 main()

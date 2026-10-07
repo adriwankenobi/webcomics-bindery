@@ -41,6 +41,7 @@ LETTER_H = (9, 48)        # px height of one letter (caps ~17-24 here)
 LETTER_W_MAX = 110
 LETTER_AREA_MAX = 2200
 MIN_LETTERS = 8           # a real text block has at least this many blobs
+BOX_MIN_LETTERS = 5       # ...or this many inside a drawn caption frame
 PAD_FRAC = 0.03
 
 
@@ -85,7 +86,8 @@ def white_letter_mask(img: np.ndarray) -> np.ndarray:
     return keep[labels].astype(np.uint8)
 
 
-def paragraph_blocks(letters: np.ndarray) -> list:
+def paragraph_blocks(letters: np.ndarray,
+                     min_letters: int = MIN_LETTERS) -> list:
     """Group letter blobs into paragraph blocks (dilate then components)."""
     joined = cv2.dilate(letters, np.ones((7, 25), np.uint8))
     joined = cv2.morphologyEx(joined, cv2.MORPH_CLOSE,
@@ -96,7 +98,7 @@ def paragraph_blocks(letters: np.ndarray) -> list:
         x, y, w, h, _ = stats[i]
         count = int(cv2.connectedComponentsWithStats(
             letters[y:y + h, x:x + w], 8)[0]) - 1
-        if count >= MIN_LETTERS and w >= 40 and h >= 14:
+        if count >= min_letters and w >= 40 and h >= 14:
             blocks.append((x, y, w, h))
     return blocks
 
@@ -925,6 +927,73 @@ def detect_page(path: Path):
                      int(gx1 - gx0), int(gy1 - gy0)],
             "mask": None}
 
+    # GRADED caption boxes nothing above found. A box whose fill grades
+    # from the tint to white defeats both letter passes at once: on the
+    # tinted part the fill's weakest channel is below DARK_MAX, so
+    # letter_mask sees letters and fill as ONE dark blob, and on the white
+    # part the tint ring test above fails. Each pass gets a fraction of the
+    # letters, and a short caption (a two-word time stamp: 7 letters) has fewer than
+    # MIN_LETTERS to begin with, so the whole box keeps its original
+    # lettering. Take the letters on EITHER ground here. With so few
+    # letters to go on, a drawn FRAME round the box is the evidence that
+    # this is a caption box and not dark marks on tinted art — and a box
+    # that overlaps anything already found is left alone, so no entry the
+    # transcripts are keyed on can change.
+    gbg = tintbg | (light > 0)
+    gkeep = np.zeros(ntc, bool)
+    for i in range(1, ntc):
+        x, y, w2, h2, area = tcstats[i]
+        if not (LETTER_H[0] <= h2 <= LETTER_H[1] and w2 <= LETTER_W_MAX
+                and 8 <= area <= LETTER_AREA_MAX):
+            continue
+        y0, y1 = max(0, y - 3), min(h, y + h2 + 3)
+        x0, x1 = max(0, x - 3), min(w, x + w2 + 3)
+        ring = gbg[y0:y1, x0:x1] & (tclabels[y0:y1, x0:x1] != i)
+        if ring.mean() >= 0.5:
+            gkeep[i] = True
+    gletters = gkeep[tclabels].astype(np.uint8)
+    gb = gbg | (gletters > 0)
+    frame = img.max(axis=2) <= 90
+    for (bx, by, bw, bh) in paragraph_blocks(gletters,
+                                             min_letters=BOX_MIN_LETTERS):
+        if any(min(bx + bw, e["bbox"][0] + e["bbox"][2])
+               > max(bx, e["bbox"][0])
+               and min(by + bh, e["bbox"][1] + e["bbox"][3])
+               > max(by, e["bbox"][1]) for e in entries.values()):
+            continue
+        # grown until the frame stops it — the frame is required below,
+        # and a short caption's letters can sit far from its sides
+        gx0, gy0, gx1, gy1 = bx, by, bx + bw, by + bh
+        for _ in range(60):
+            grew = False
+            if gx0 > 4 and gb[gy0:gy1, gx0 - 4:gx0].mean() > 0.9:
+                gx0 -= 4; grew = True
+            if gx1 < w - 4 and gb[gy0:gy1, gx1:gx1 + 4].mean() > 0.9:
+                gx1 += 4; grew = True
+            if gy0 > 4 and gb[gy0 - 4:gy0, gx0:gx1].mean() > 0.9:
+                gy0 -= 4; grew = True
+            if gy1 < h - 4 and gb[gy1:gy1 + 4, gx0:gx1].mean() > 0.9:
+                gy1 += 4; grew = True
+            if not grew:
+                break
+        if gb[gy0:gy1, gx0:gx1].mean() < 0.85:
+            continue
+        if tintbg[gy0:gy1, gx0:gx1].mean() < 0.15:
+            continue    # white ground: the light-paper pass's business
+        # the frame: dark on all four sides, within a growth step or two
+        fb = 8
+        sides = (frame[max(0, gy0 - fb):gy0, gx0:gx1].any(axis=0).mean(),
+                 frame[gy1:gy1 + fb, gx0:gx1].any(axis=0).mean(),
+                 frame[gy0:gy1, max(0, gx0 - fb):gx0].any(axis=1).mean(),
+                 frame[gy0:gy1, gx1:gx1 + fb].any(axis=1).mean())
+        if min(sides) < 0.85:
+            continue
+        entries[("tint", bx // 50, by // 50)] = {
+            "kind": "tint", "block": [int(bx), int(by), int(bw), int(bh)],
+            "bbox": [int(gx0), int(gy0),
+                     int(gx1 - gx0), int(gy1 - gy0)],
+            "mask": None}
+
     # merge entries whose masks overlap: the lobes of one compound balloon
     # (each keeps its own text block; the merged bubble holds N paragraphs)
     def bbox_overlap(a, b):
@@ -1202,8 +1271,18 @@ def detect_page(path: Path):
         ayov = (min(a["block"][1] + a["block"][3],
                     b2["block"][1] + b2["block"][3])
                 - max(a["block"][1], b2["block"][1]))
-        if (axov >= 0.25 * min(a["block"][2], b2["block"][2])
-                and ayov >= 0.25 * min(a["block"][3], b2["block"][3])):
+        side = axov < 0.25 * min(a["block"][2], b2["block"][2])
+        diagonal = (not side
+                    and ayov >= 0.25 * min(a["block"][3], b2["block"][3]))
+        # ...and a straight cut is just as wrong whenever the blocks OVERLAP
+        # on the axis it is cut across: the window between them then runs
+        # backwards, so wherever the cut lands it is inside one block. p3-047
+        # b03's balloon lost the first letter of every line to its joined
+        # neighbour (blocks 43px over each other in x, under the 25% that
+        # makes them "diagonal"); its cleaning, confined to its mask, never
+        # reached them and they printed as faint marks beside the new text.
+        backwards = (axov > 0 if side else ayov > 0)
+        if diagonal or backwards:
             # DIAGONAL lobes: the blocks overlap on BOTH axes, so neither a
             # row nor a column separates them and the window below runs
             # BACKWARDS — p294's cut fell at 1954, inside b07's own last
@@ -1224,7 +1303,7 @@ def detect_page(path: Path):
             seeds = [s & ~both for s in seeds]
             pa, pb = seam_split(union, seeds)
             parts = {id(a): pa > 0, id(b2): pb > 0}
-        elif axov < 0.25 * min(a["block"][2], b2["block"][2]):
+        elif side:
             left, right = ((a, b2) if a["block"][0] <= b2["block"][0]
                            else (b2, a))
             lo = left["block"][0] + left["block"][2] - ux0 - 10

@@ -397,13 +397,107 @@ def crop_to_content(im: Image.Image, tolerance: int = 26,
     border = np.concatenate([a[:ring].reshape(-1, 3), a[-ring:].reshape(-1, 3),
                              a[:, :ring].reshape(-1, 3), a[:, -ring:].reshape(-1, 3)])
     paper = np.median(border, axis=0)
-    mask = np.abs(a - paper).max(axis=2) > tolerance
+    mask = drop_edge_stripes(np.abs(a - paper).max(axis=2) > tolerance,
+                             min_frac)
     rows = np.flatnonzero(mask.mean(axis=1) > min_frac)
     cols = np.flatnonzero(mask.mean(axis=0) > min_frac)
     if not len(rows) or not len(cols):
         return im
     return im.crop((int(cols[0]), int(rows[0]),
                     int(cols[-1]) + 1, int(rows[-1]) + 1))
+
+
+def drop_edge_stripes(mask, min_frac: float = 0.002):
+    """The content mask with the scan's edge stripes cleared.
+
+    A stripe is the gutter shadow or the scanner lid's edge: a run of
+    content columns (or rows) at most 1% of the page wide, touching the
+    scan's own edge, a real gap of paper away from the art. Kept, it holds
+    the crop open twice over — on its own axis, out to the edge, and on the
+    OTHER axis over every row it runs down (book 3 p205: 8px of grey at
+    x=0 down the top 555 rows held both the left and the top margin, the
+    art printed 4% smaller). Clearing one stripe can expose another on the
+    other axis, so repeat until none is left. Art that bleeds to the edge
+    is no stripe: it is wider than 1%, or no gap separates it."""
+    import numpy as np
+
+    mask = mask.copy()
+    for _ in range(4):
+        found = False
+        for axis in (0, 1):                  # 0: columns, 1: rows
+            n = mask.shape[1 - axis]
+            idx = np.flatnonzero(mask.mean(axis=axis) > min_frac)
+            if not len(idx):
+                return mask
+            runs = np.split(idx, np.flatnonzero(
+                np.diff(idx) > max(5, round(0.01 * n))) + 1)
+            width = max(3, round(0.01 * n))
+            stripes = []
+            if len(runs) > 1 and runs[0][0] == 0 and len(runs[0]) <= width:
+                stripes.append(slice(0, int(runs[0][-1]) + 1))
+            if len(runs) > 1 and runs[-1][-1] == n - 1 and len(runs[-1]) <= width:
+                stripes.append(slice(int(runs[-1][0]), n))
+            for s in stripes:
+                if axis == 0:
+                    mask[:, s] = False
+                else:
+                    mask[s] = False
+            found = found or bool(stripes)
+        if not found:
+            break
+    return mask
+
+
+def trim_folio_band(cropped: Image.Image, page: Image.Image,
+                    tolerance: int = 26, min_frac: float = 0.002,
+                    speck_rows: float = 2.0) -> Image.Image:
+    """The content crop of a page whose folio was erased, with the band the
+    folio sat in trimmed off.
+
+    crop_to_content keeps every row that holds a few px of non-paper, and on
+    a page whose folio was erased what is left in that band is scan-edge dust:
+    a 4px speck on the last row, a smudge at x=0. It held the crop open down
+    to the bottom of the scan, so the page kept a strip of empty paper 50-90px
+    tall and its art printed several % smaller than its neighbours'. Below a
+    real gap, a run of rows holding less ink than `speck_rows` full lines is
+    dust, and so are empty rows. Bottom edge only, folio pages only: that is
+    where the folio was, and the rest of every page is as approved."""
+    import numpy as np
+    a = np.asarray(cropped.convert("RGB"), dtype=np.int16)
+    h, w = a.shape[:2]
+    b = np.asarray(page.convert("RGB"), dtype=np.int16)
+    ring = max(2, round(min(b.shape[:2]) * 0.02))
+    paper = np.median(np.concatenate(
+        [b[:ring].reshape(-1, 3), b[-ring:].reshape(-1, 3),
+         b[:, :ring].reshape(-1, 3), b[:, -ring:].reshape(-1, 3)]), axis=0)
+    mask = np.abs(a - paper).max(axis=2) > tolerance
+    idx = np.flatnonzero(mask.mean(axis=1) > min_frac)
+    if not len(idx):
+        return cropped
+    runs = np.split(idx, np.flatnonzero(np.diff(idx) > max(5, round(0.01 * h)))
+                    + 1)
+    while len(runs) > 1 and (mask[runs[-1][0]:runs[-1][-1] + 1].sum()
+                             < speck_rows * w):
+        runs.pop()
+    bottom = int(runs[-1][-1]) + 1
+    # no early return when the bottom is already tight: the sides below need
+    # checking all the same (crop_to_content's edge-stripe rule can have
+    # tightened the bottom first, leaving a speck in from the edge)
+    # the same dust held the SIDES open too — a smudge at x=0 in the band,
+    # or the dark edge of the scan itself: a stripe a few px wide down the
+    # page's edge, a real gap away from the art. Re-measure the columns on
+    # what is left and drop such an edge run.
+    cols = np.flatnonzero(mask[:bottom].mean(axis=0) > min_frac)
+    if not len(cols):
+        return cropped.crop((0, 0, w, bottom))
+    cruns = np.split(cols, np.flatnonzero(np.diff(cols) > max(5, round(0.01 * w)))
+                     + 1)
+    edge = max(3, round(0.01 * w))
+    if len(cruns) > 1 and cruns[0][0] == 0 and len(cruns[0]) <= edge:
+        cruns.pop(0)
+    if len(cruns) > 1 and cruns[-1][-1] == w - 1 and len(cruns[-1]) <= edge:
+        cruns.pop()
+    return cropped.crop((int(cruns[0][0]), 0, int(cruns[-1][-1]) + 1, bottom))
 
 
 def paper_color(src: Path) -> tuple:
@@ -469,6 +563,417 @@ def pick_split_x(im: Image.Image, window: float = 0.05,
     return int(center - half + round((gutter[0] + gutter[-1]) / 2))
 
 
+# --- the source's own printed page numbers (folios) -------------------------
+# Many sources carry their original edition's page number at the bottom
+# centre (under each half of a spread). The book draws its own, so the
+# original is erased before the crop — which also stops it stretching the
+# content box. Detection keys on the ISSUE, never on one page: a folio is a
+# group of 1-3 digit-shaped marks, and an issue counts as numbered only when
+# many of its pages agree on the marks' height and position (stray specks,
+# scan dust and lettering never do). The printed value restarts per issue and
+# is not the file number, so it is never predicted — only position and look.
+FOLIO_TOP = 0.92            # folios sit below this fraction of page height
+FOLIO_H = (0.007, 0.018)    # digit height range, fraction of page height
+FOLIO_CONTRAST = 60         # ink vs local background (luma)
+FOLIO_VOTE = (3, 0.2)       # pages that must agree: at least N and this share
+FOLIO_CACHE = "folios.json"
+FOLIO_VERSION = 1
+
+
+def _label(mask):
+    """8-connected components of a bool mask as (ys, xs) arrays — labelled
+    on row runs with union-find (no scipy in the base venv)."""
+    import numpy as np
+    h, w = mask.shape
+    padded = np.zeros((h, w + 2), np.int8)
+    padded[:, 1:-1] = mask
+    d = np.diff(padded, axis=1)
+    sy, sx = np.nonzero(d == 1)
+    ex = np.nonzero(d == -1)[1]
+    parent = list(range(len(sy)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    row = np.searchsorted(sy, np.arange(h + 1))
+    for y in range(1, h):
+        i, j, a1, b1 = row[y - 1], row[y], row[y], row[y + 1]
+        while i < a1 and j < b1:
+            if sx[i] <= ex[j] and sx[j] <= ex[i]:   # touch incl. diagonals
+                ri, rj = find(i), find(j)
+                if ri != rj:
+                    parent[ri] = rj
+            if ex[i] < ex[j]:
+                i += 1
+            else:
+                j += 1
+    groups = {}
+    for k in range(len(sy)):
+        groups.setdefault(find(k), []).append(k)
+    return [(np.concatenate([np.full(ex[k] - sx[k], sy[k]) for k in ks]),
+             np.concatenate([np.arange(sx[k], ex[k]) for k in ks]))
+            for ks in groups.values()]
+
+
+def _dilate(mask, r: int):
+    out = mask.copy()
+    for _ in range(r):
+        m = out.copy()
+        m[1:] |= out[:-1]
+        m[:-1] |= out[1:]
+        m[:, 1:] |= out[:, :-1]
+        m[:, :-1] |= out[:, 1:]
+        out = m
+    return out
+
+
+def _luma(rgb):
+    import numpy as np
+    return (rgb.astype(np.int32) @ np.array([299, 587, 114]) // 1000
+            ).astype(np.int16)
+
+
+def _folio_ink(rgb, page_h: int):
+    """(luma, {"dark": mask, "light": mask}) for a region: ink = pixels
+    well off a local median background, which is flat paper, a flat band,
+    or the artwork itself."""
+    import numpy as np
+    from PIL import ImageFilter
+    luma = _luma(rgb)
+    k = min(31, int(FOLIO_H[1] * page_h) | 1)
+    bg = np.asarray(Image.fromarray(luma.astype(np.uint8)).filter(
+        ImageFilter.MedianFilter(k)), dtype=np.int16)
+    return luma, {"dark": luma - bg < -FOLIO_CONTRAST,
+                  "light": luma - bg > FOLIO_CONTRAST,
+                  "any": np.abs(luma - bg) > FOLIO_CONTRAST}
+
+
+def _digit_groups(rgb, page_h: int, strict: bool) -> list:
+    """Groups of 1-3 digit-shaped marks in one search window (region-
+    relative boxes). strict: alone on a plain surround — the evidence an
+    issue's folio band is built from. Relaxed: may sit on artwork, but must
+    be the flat near-black / near-white ink a folio is printed in."""
+    import numpy as np
+    luma, inks = _folio_ink(rgb, page_h)
+    lo, hi = FOLIO_H[0] * page_h, FOLIO_H[1] * page_h
+    rh, rw = rgb.shape[:2]
+    out = []
+    for pol in ("dark", "light"):
+        ink = inks[pol]
+        digits = []
+        for ys, xs in _label(ink):
+            y0, y1, x0, x1 = ys.min(), ys.max() + 1, xs.min(), xs.max() + 1
+            ch, cw = y1 - y0, x1 - x0
+            fill = len(ys) / (ch * cw)
+            # a "1" is a bar: solid fill is fine when the mark is that thin
+            if (lo <= ch <= hi and 0.12 * ch <= cw <= ch
+                    and 0.15 <= fill <= (1.0 if cw <= 0.3 * ch else 0.9)
+                    and x0 > 0 and x1 < rw and y1 < rh):
+                digits.append({"box": (x0, y0, x1, y1), "h": ch, "fill": fill,
+                               "lum": float(np.median(luma[ys, xs])),
+                               "ys": ys, "xs": xs})
+        digits.sort(key=lambda c: c["box"][0])
+        used = set()
+        for i, c in enumerate(digits):
+            if i in used:
+                continue
+            grp = [i]
+            for j in range(i + 1, len(digits)):
+                d, last = digits[j], digits[grp[-1]]
+                if (abs(d["h"] - c["h"]) <= 0.2 * c["h"]
+                        and abs(d["box"][1] + d["box"][3]
+                                - c["box"][1] - c["box"][3]) <= 0.5 * c["h"]
+                        and d["box"][0] - last["box"][2] <= 0.6 * c["h"]):
+                    grp.append(j)
+            used.update(grp)
+            if len(grp) > 3:
+                continue        # a line of lettering, not a page number
+            members = [digits[g] for g in grp]
+            x0 = min(m["box"][0] for m in members)
+            y0 = min(m["box"][1] for m in members)
+            x1 = max(m["box"][2] for m in members)
+            y1 = max(m["box"][3] for m in members)
+            gh = y1 - y0
+            tone = float(np.median(np.concatenate(
+                [luma[m["ys"], m["xs"]] for m in members])))
+            # complete the number: a grey digit's pale strokes break off,
+            # and a digit touching art of its own colour never comes back as
+            # a digit-shaped piece — take in same-tone ink in the number's
+            # rows, up to a digit width either side, while it stays contiguous
+            cols = (ink & (np.abs(luma - tone) <= 40))[y0:y1].any(axis=0)
+            reach, gap = int(round(0.65 * gh)), int(round(0.3 * gh))
+            nx0 = x0
+            while nx0 > max(0, x0 - reach):
+                seg = cols[max(0, nx0 - gap):nx0]
+                if not seg.any():
+                    break
+                nx0 = max(0, nx0 - gap) + int(np.argmax(seg))
+            nx1 = x1
+            while nx1 < min(rw, x1 + reach):
+                seg = cols[nx1:nx1 + gap]
+                if not seg.any():
+                    break
+                nx1 += len(seg) - int(np.argmax(seg[::-1]))
+            x0, x1 = nx0, nx1
+            mine = np.zeros((rh, rw), bool)
+            mine[y0:y1, x0:x1] = ink[y0:y1, x0:x1]
+            # a number stands alone on its line: marks continuing it sideways
+            # make it lettering (a panel edge just above is fine)
+            other = inks["any"].copy()
+            other[y0:y1, x0:x1] = False
+            side = int(round(0.6 * gh))
+            stray = int(other[y0:y1, max(0, x0 - side):x1 + side].sum())
+            pad = int(round(0.35 * gh))
+            ring = np.zeros((rh, rw), bool)
+            ring[max(0, y0 - pad):y1 + pad, max(0, x0 - pad):x1 + pad] = True
+            ring = rgb[ring & ~_dilate(mine, 2)]
+            # share of the surround at its own colour: a plain margin or band
+            # even with a bit of art reaching into one edge
+            plain = (float((np.abs(ring - np.median(ring, axis=0)).max(axis=1)
+                            <= 24).mean()) if len(ring) else 0.0)
+            if strict:
+                if stray > 0.05 * gh * gh or plain < 0.85:
+                    continue
+                if pol == "light" and tone < 160:
+                    continue    # light folios are printed white
+            elif not all((m["lum"] <= 70 if pol == "dark" else m["lum"] >= 200)
+                         and m["fill"] >= 0.25 for m in members):
+                continue
+            out.append({"box": (x0, y0, x1, y1), "pol": pol})
+    return out
+
+
+def folio_candidates(im: Image.Image, strict: bool) -> list:
+    """Digit groups in a page's folio windows, in page coordinates, with the
+    window's expected centre (want: 0.5 for a page, 0.25/0.75 under each half
+    of a spread) and the group's position as page fractions."""
+    import numpy as np
+    a = np.asarray(im.convert("RGB"), dtype=np.int16)
+    h, w = a.shape[:2]
+    top = int(h * FOLIO_TOP)
+    windows = ([(0.25, 0.19, 0.31), (0.75, 0.69, 0.81)]
+               if w / h >= SPREAD_MIN_RATIO else [(0.5, 0.40, 0.60)])
+    found = []
+    for want, f0, f1 in windows:
+        x0 = int(w * f0)
+        for g in _digit_groups(a[top:, x0:int(w * f1)], h, strict):
+            bx0, by0, bx1, by1 = g["box"]
+            box = [x0 + bx0, top + by0, x0 + bx1, top + by1]
+            found.append({"box": [int(v) for v in box], "pol": g["pol"],
+                          "want": want, "cx": (box[0] + box[2]) / 2 / w,
+                          "cy": (box[1] + box[3]) / 2 / h,
+                          "hf": (box[3] - box[1]) / h})
+    return found
+
+
+def _folio_issue(stem: str) -> str:
+    """The issue a page belongs to: its name minus the trailing page number
+    (and any tag after it, e.g. 'cover')."""
+    import re
+    return re.sub(r"\s+\d+[a-z]*(\s+\D*)?$", "", stem)
+
+
+def _folio_parity(stem: str):
+    import re
+    m = re.search(r"(\d+)[a-z]*(\s+\D*)?$", stem)
+    return int(m.group(1)) % 2 if m else None
+
+
+def _folio_pick(cands, band, want=None, cx_tol=0.04, cy_tol=0.02,
+                hf_tol=0.25) -> list:
+    """At most one folio per window: the band match nearest the expected x
+    (want overrides the window centre)."""
+    out = {}
+    for g in cands:
+        x = (want or {}).get(g["want"], g["want"])
+        if (abs(g["hf"] - band[1]) <= hf_tol * band[1]
+                and abs(g["cy"] - band[0]) <= cy_tol
+                and abs(g["cx"] - x) <= cx_tol):
+            k = g["want"]
+            if k not in out or abs(g["cx"] - x) < abs(out[k]["cx"] - x):
+                out[k] = g
+    return list(out.values())
+
+
+def find_folios(pages: list) -> tuple:
+    """({filename: [{"box", "pol", "art"}]}, report lines) for one comic's
+    story pages. Per issue: strict candidates vote a band (height, position);
+    every page then gets its band match — strict first, else relaxed (on
+    art) at the side the issue prints that page parity's number."""
+    import numpy as np
+    from collections import defaultdict
+    issues = defaultdict(list)
+    for p in pages:
+        issues[_folio_issue(p.stem)].append(p)
+    plan, report = {}, []
+    for issue, files in sorted(issues.items()):
+        strict = {}
+        for p in files:
+            with Image.open(p) as im:
+                strict[p] = folio_candidates(im, True)
+        # the vote is tighter than the per-page match: a real folio band
+        # agrees within a few % of height and ~1% of position
+        allc = [g for cs in strict.values() for g in cs
+                if abs(g["cx"] - g["want"]) <= 0.03]
+        best, best_pages = [], 0
+        for g in allc:
+            agree = [o for o in allc if abs(o["hf"] - g["hf"]) <= 0.1 * g["hf"]
+                     and abs(o["cy"] - g["cy"]) <= 0.012]
+            ids = {id(o) for o in agree}
+            n = sum(1 for cs in strict.values() if any(id(o) in ids for o in cs))
+            if n > best_pages:
+                best, best_pages = agree, n
+        if best_pages < max(FOLIO_VOTE[0], FOLIO_VOTE[1] * len(files)):
+            continue
+        band = (float(np.median([g["cy"] for g in best])),
+                float(np.median([g["hf"] for g in best])))
+        picked = {p: _folio_pick(strict[p], band) for p in files}
+        sides = defaultdict(list)
+        for p, gs in picked.items():
+            sides[_folio_parity(p.stem)] += [g["cx"] for g in gs
+                                             if g["want"] == 0.5]
+        want = {k: {0.5: float(np.median(v))} for k, v in sides.items()
+                if len(v) >= 3}
+        on_art = []
+        for p in files:
+            gs, art = picked[p], False
+            if not gs:
+                with Image.open(p) as im:
+                    gs = _folio_pick(folio_candidates(im, False), band,
+                                     want.get(_folio_parity(p.stem)),
+                                     cx_tol=0.015, hf_tol=0.08)
+                art = bool(gs)
+            if gs:
+                plan[p.name] = [{"box": g["box"], "pol": g["pol"], "art": art}
+                                for g in gs]
+                if art:
+                    on_art.append(p.stem)
+        n = sum(1 for p in files if p.name in plan)
+        report.append(f"  {issue}: {n} of {len(files)} pages"
+                      + (f" ({len(on_art)} over art)" if on_art else ""))
+    return plan, report
+
+
+def _inpaint(a, mask, iters: int = 400):
+    """Harmonic (Laplace) fill of mask from its surroundings, solved
+    coarse-to-fine so a patch a few dozen px wide converges in a few hundred
+    sweeps."""
+    import numpy as np
+    h, w = mask.shape
+    if min(h, w) >= 16:
+        hh, ww = h // 2 * 2, w // 2 * 2
+        known = ~mask[:hh, :ww].reshape(h // 2, 2, w // 2, 2)
+        cnt = known.sum(axis=(1, 3))
+        blocks = a[:hh, :ww].reshape(h // 2, 2, w // 2, 2, 3)
+        coarse = ((blocks * known[..., None]).sum(axis=(1, 3))
+                  / np.maximum(cnt, 1)[..., None])
+        coarse = _inpaint(coarse, cnt == 0, iters)
+        full = np.empty_like(a)
+        full[:] = a[~mask].mean(axis=0)
+        full[:hh, :ww] = np.repeat(np.repeat(coarse, 2, axis=0), 2, axis=1)
+        a = np.where(mask[..., None], full, a)
+    else:
+        a = np.where(mask[..., None], a[~mask].mean(axis=0), a)
+    for _ in range(iters):
+        p = np.pad(a, ((1, 1), (1, 1), (0, 0)), mode="edge")
+        avg = (p[:-2, 1:-1] + p[2:, 1:-1] + p[1:-1, :-2] + p[1:-1, 2:]) / 4
+        a = np.where(mask[..., None], avg, a)
+    return a
+
+
+def erase_folios(im: Image.Image, folios: list) -> Image.Image:
+    """The page with its folios erased. On a plain margin or band the digits
+    and their halo (anti-aliasing, JPEG ringing) take the surround's colour,
+    keeping anything far from it (a panel border, line art); over artwork
+    the patch is filled in from its edges."""
+    import numpy as np
+    from PIL import ImageFilter
+    if not folios:
+        return im
+    a = np.asarray(im.convert("RGB")).astype(np.float64)
+    h, w = a.shape[:2]
+    for f in folios:
+        bx0, by0, bx1, by1 = f["box"]
+        gh = by1 - by0
+        pad = max(6, int(round(0.3 * gh)))
+        # the ink mask, re-derived from the box like detection derived it
+        # (a background window wide enough for the median to see past it)
+        m = 40
+        rx0, ry0 = max(0, bx0 - m), max(0, by0 - m)
+        rx1, ry1 = min(w, bx1 + m), min(h, by1 + m)
+        _, inks = _folio_ink(a[ry0:ry1, rx0:rx1].astype(np.int16), h)
+        digits = np.zeros((h, w), bool)
+        digits[by0:by1, bx0:bx1] = inks[f["pol"]][by0 - ry0:by1 - ry0,
+                                                  bx0 - rx0:bx1 - rx0]
+        y0, y1 = max(0, by0 - pad), min(h, by1 + pad)
+        x0, x1 = max(0, bx0 - pad), min(w, bx1 + pad)
+        digits = digits[y0:y1, x0:x1]
+        patch = a[y0:y1, x0:x1]
+        # what directly surrounds the number decides plain vs art; a border
+        # or art a few px further out must not
+        ring = patch[_dilate(digits, 6) & ~_dilate(digits, 3)]
+        med = np.median(ring, axis=0)
+        if (np.abs(ring - med).max(axis=1) <= 36).mean() >= 0.85:
+            # the surround's colour, plus the paper's own drift (grain, a
+            # gradient) interpolated in from the patch edge — a flat median
+            # shows as a faint square; things far from it (a border) count
+            # as plain paper so they cannot bleed in
+            near = np.abs(patch - med).max(axis=2) <= 80
+            fill = _dilate(digits, 2) | (near & _dilate(digits, 5))
+            drift = np.where(near[..., None], patch - med, 0.0)
+            patch[fill] = (med + _inpaint(drift, fill))[fill]
+        else:
+            # the halo is whatever near the number still differs from the
+            # local background — left in, it seeds the fill with a ghost
+            k = min(31, max(3, int(round(1.2 * gh))) | 1)
+            bg = np.asarray(Image.fromarray(np.clip(patch, 0, 255).astype(
+                np.uint8)).filter(ImageFilter.MedianFilter(k)), np.float64)
+            halo = np.abs(patch - bg).max(axis=2) > 16
+            near = np.zeros_like(digits)
+            near[max(0, by0 - y0 - 4):by1 - y0 + 4,
+                 max(0, bx0 - x0 - 4):bx1 - x0 + 4] = True
+            patch[:] = _inpaint(patch, _dilate(digits, 3)
+                                | (_dilate(halo, 1) & near))
+    return Image.fromarray(np.clip(a + 0.5, 0, 255).astype(np.uint8))
+
+
+_FOLIO_PLANS = {}
+
+
+def folio_plan(comic_dir: Path, cache_dir: Path = None) -> dict:
+    """{source filename: folios} for a comic, computed once and cached in
+    upscaled/<comic>/folios.json (keyed on every story source's size and
+    mtime, so adding or replacing a source re-detects)."""
+    import json
+    comic_dir = Path(comic_dir)
+    if comic_dir in _FOLIO_PLANS:
+        return _FOLIO_PLANS[comic_dir]
+    cache_dir = cache_dir or REPO / "upscaled" / comic_dir.name
+    pages = [p for p in image_files(comic_dir) if "cover" not in p.stem.lower()]
+    key = {p.name: [p.stat().st_size, int(p.stat().st_mtime)] for p in pages}
+    cache = cache_dir / FOLIO_CACHE
+    try:
+        cached = json.loads(cache.read_text())
+        if cached.get("version") == FOLIO_VERSION and cached["sources"] == key:
+            _FOLIO_PLANS[comic_dir] = cached["pages"]
+            return cached["pages"]
+    except (OSError, ValueError, KeyError):
+        pass
+    print(f"Looking for the sources' own page numbers ({len(pages)} pages)...",
+          flush=True)
+    plan, report = find_folios(pages)
+    print("\n".join(report) if report else "  none found")
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache.write_text(json.dumps({"version": FOLIO_VERSION, "sources": key,
+                                 "pages": plan, "report": report},
+                                ensure_ascii=False, indent=0))
+    _FOLIO_PLANS[comic_dir] = plan
+    return plan
+
+
 def upscale_spec(src: Path) -> dict:
     """How this page will be produced: the (possibly cropped) content image,
     kind ('single' or 'spread'), scale, target size and split point. Shared
@@ -484,9 +989,15 @@ def upscale_spec(src: Path) -> dict:
     elif img.height > img.width and is_index_page(src):
         box, note, is_cover = canvas_size(), ", index: full canvas", False
     else:
+        folios = folio_plan(src.parent).get(src.name, [])
+        img = erase_folios(img, folios)
         cropped = crop_to_content(img)
+        if folios:
+            cropped = trim_folio_band(cropped, img)
         note = (f", cropped from {img.width}x{img.height}"
                 if cropped.size != img.size else "")
+        if folios:
+            note += ", original page number erased"
         img = cropped
         box, is_cover = story_box(), False
     w, h = img.size
@@ -556,6 +1067,18 @@ def cmd_upscale(comic_dir: Path, out_dir: Path, engine: str = "realesrgan",
             return False  # nothing there: skip the (costly) spec computation
         spec = upscale_spec(p)
         tw, th = spec["target"]
+        outs = ([p.stem] if spec["kind"] == "single"
+                else [p.stem + "-1", p.stem + "-2"])
+        # erasing a folio changes the pixels but often not the size (the
+        # crop box only moves when the number stretched it), so a size check
+        # alone kept 15 pages of one book with their numbers still printed.
+        # An output older than the folio plan that erases something on it
+        # predates the erasure.
+        cache = out_dir / FOLIO_CACHE
+        if (folio_plan(p.parent).get(p.name) and cache.is_file()
+                and any(done[s].stat().st_mtime < cache.stat().st_mtime
+                        for s in outs if s in done)):
+            return False
         if spec["kind"] == "single":
             return matches(p.stem, th, tw)
         return matches(p.stem + "-1", th) and matches(p.stem + "-2", th)
@@ -574,6 +1097,22 @@ def cmd_upscale(comic_dir: Path, out_dir: Path, engine: str = "realesrgan",
                     print(f"  removed stale output: {stale}")
 
     pending = [p for p in processable if not is_done(p)]
+    # once the fit has run, upscaled/ holds the CLEANED working pages, and
+    # layout.json, the masks and the positional transcripts are all in that
+    # page's geometry: a crop or sizing rule that moves an existing page must
+    # not re-upscale it in place. Report it; rebuild it deliberately.
+    if (RELETTER_DIR / comic_dir.name / "layout.json").is_file():
+        moved = [p for p in pending
+                 if p.stem in done or {p.stem + "-1", p.stem + "-2"} & set(done)]
+        if moved:
+            print(f"\nKEPT {len(moved)} re-lettered page(s) whose expected "
+                  "upscale changed — re-upscaling would overwrite the cleaned "
+                  "page under a layout in the old geometry. To rebuild one: "
+                  "re-upscale, remap its transcripts through the source and "
+                  "re-letter it (ARCHITECTURE.md, single-page recipe):")
+            for p in moved:
+                print(f"  KEPT: {p.name}")
+            pending = [p for p in pending if p not in moved]
     already = len(processable) - len(pending)
     if already:
         print(f"{already} already upscaled, {len(pending)} to go")
@@ -697,6 +1236,74 @@ def scm_quote(s: str) -> str:
     return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
+def source_of(f: Path, comic_dir: Path):
+    """The source image an upscaled page came from (a spread half maps to
+    the whole spread), or None."""
+    stem = f.stem
+    if stem.endswith(("-1", "-2")):
+        stem = stem[:-2]
+    return next(iter(comic_dir.glob(stem + ".*")), None)
+
+
+def page_numbers(in_dir: Path, comic_dir: Path) -> tuple:
+    """(files, {filename: number}). Page numbers = final book positions
+    (blanks included); drawn only on story pages and spread halves — never
+    on covers, indexes, art pages, or blanks."""
+    import re
+    print("Computing book layout for page numbers...")
+    files, kinds, plan, _ = book_plan(in_dir)
+
+    def is_art(f: Path) -> bool:
+        # art pages get no number: the word 'art' in the filename (marker,
+        # like 'cover'), or auto-detected on the SOURCE image (the upscaled
+        # file is cropped, which strips the margins the detector needs)
+        if re.search(r"\bart\b", f.stem, re.IGNORECASE):
+            return True
+        src = source_of(f, comic_dir)
+        return src is not None and paper_page_kind(src) == "art"
+
+    numbers = {}
+    for pos, entry in enumerate(plan, 1):
+        if (entry is not None
+                and kinds[files.index(entry)] in ("story", "half1")
+                and not is_art(entry)):
+            numbers[entry.name] = pos
+    return files, numbers
+
+
+def write_numbers_file(files: list, numbers: dict, comic_dir: Path,
+                       xcf_dir: Path) -> Path:
+    """Per-page metadata for the plugin (xcf_dir/numbers.txt): page number
+    ('-' = none) and the paper color measured from the SOURCE image (the
+    cropped content's own border is art, so the plugin can no longer
+    measure it itself). Header: the number zone runs from the lowest
+    possible art edge to the safety line; the strip below it, down to the
+    trim, is left empty because the printer's cut can reach into it."""
+    lines = [f"ART_BOTTOM {(canvas_size()[1] + story_box()[1]) // 2}",
+             f"SAFETY_BOTTOM {safety_bottom_y()}",
+             f"STRIP_BOTTOM {strip_bottom_y()}"]
+    for f in files:
+        num = numbers.get(f.name, "-")
+        src = source_of(f, comic_dir)
+        rgb = ",".join(map(str, paper_color(src))) if src else "-"
+        lines.append(f"{f.name}\t{num}\t{rgb}")
+    numbers_file = xcf_dir / "numbers.txt"
+    numbers_file.write_text("\n".join(lines) + "\n")
+    return numbers_file
+
+
+def run_gimp_plugin(call: str) -> list:
+    """Run one plugin call in GIMP batch mode; returns the COMPOSE/ERROR
+    lines. GIMP on macOS often exits non-zero after a successful batch
+    run (gimp_wire_write_msg noise), so callers judge success from the
+    plugin's own DONE line instead of the return code."""
+    # no -f: fonts must load for the page-number text
+    cmd = [GIMP, "-i", "-d", "-b", call, "-b", "(gimp-quit 0)"]
+    proc = subprocess.run(cmd, text=True, capture_output=True)
+    lines = (proc.stdout + proc.stderr).splitlines()
+    return [l for l in lines if l.startswith(("COMPOSE", "ERROR"))]
+
+
 def cmd_compose(in_dir: Path, xcf_dir: Path, pdf_dir: Path,
                 comic_dir: Path) -> int:
     if not TEMPLATE.is_file():
@@ -708,34 +1315,8 @@ def cmd_compose(in_dir: Path, xcf_dir: Path, pdf_dir: Path,
     xcf_dir.mkdir(parents=True, exist_ok=True)
     pdf_dir.mkdir(parents=True, exist_ok=True)
 
-    # page numbers = final book positions (blanks included); drawn only on
-    # story pages and spread halves — never on covers, indexes, or blanks
     import json
-    import re
-    print("Computing book layout for page numbers...")
-    files, kinds, plan, _ = book_plan(in_dir)
-
-    def source_of(f: Path) -> Path:
-        stem = f.stem
-        if stem.endswith(("-1", "-2")):
-            stem = stem[:-2]
-        return next(iter(comic_dir.glob(stem + ".*")), None)
-
-    def is_art(f: Path) -> bool:
-        # art pages get no number: the word 'art' in the filename (marker,
-        # like 'cover'), or auto-detected on the SOURCE image (the upscaled
-        # file is cropped, which strips the margins the detector needs)
-        if re.search(r"\bart\b", f.stem, re.IGNORECASE):
-            return True
-        src = source_of(f)
-        return src is not None and paper_page_kind(src) == "art"
-
-    numbers = {}
-    for pos, entry in enumerate(plan, 1):
-        if (entry is not None
-                and kinds[files.index(entry)] in ("story", "half1")
-                and not is_art(entry)):
-            numbers[entry.name] = pos
+    files, numbers = page_numbers(in_dir, comic_dir)
 
     # pages whose number changed since the last compose (or that have never
     # been numbered) must be recomposed
@@ -748,33 +1329,14 @@ def cmd_compose(in_dir: Path, xcf_dir: Path, pdf_dir: Path,
             (xcf_dir / (f.stem + ".xcf")).unlink(missing_ok=True)
             (pdf_dir / (f.stem + ".pdf")).unlink(missing_ok=True)
 
-    # per-page metadata for the plugin: page number ('-' = none) and the
-    # paper color measured from the SOURCE image (the cropped content's own
-    # border is art, so the plugin can no longer measure it itself)
-    # badge zone: between the lowest possible art edge and the trim line
-    art_bottom = (canvas_size()[1] + story_box()[1]) // 2
-    lines = [f"ART_BOTTOM {art_bottom}", f"STRIP_BOTTOM {strip_bottom_y()}"]
-    for f in files:
-        num = numbers.get(f.name, "-")
-        src = source_of(f)
-        rgb = ",".join(map(str, paper_color(src))) if src else "-"
-        lines.append(f"{f.name}\t{num}\t{rgb}")
-    numbers_file = xcf_dir / "numbers.txt"
-    numbers_file.write_text("\n".join(lines) + "\n")
+    numbers_file = write_numbers_file(files, numbers, comic_dir, xcf_dir)
 
     call = "(python-fu-webcomics-compose RUN-NONINTERACTIVE {} {} {} {} {})".format(
         scm_quote(str(in_dir)), scm_quote(str(TEMPLATE)),
         scm_quote(str(xcf_dir)), scm_quote(str(pdf_dir)),
         scm_quote(str(numbers_file)))
-    # no -f: fonts must load for the page-number text
-    cmd = [GIMP, "-i", "-d", "-b", call, "-b", "(gimp-quit 0)"]
     print("Running GIMP batch (this can take a while)...", flush=True)
-    # GIMP on macOS often exits non-zero after a successful batch run
-    # (gimp_wire_write_msg noise), so success is judged from the plugin's
-    # own "COMPOSE DONE ... 0 failed" line instead of the return code.
-    proc = subprocess.run(cmd, text=True, capture_output=True)
-    lines = (proc.stdout + proc.stderr).splitlines()
-    interesting = [l for l in lines if l.startswith(("COMPOSE", "ERROR"))]
+    interesting = run_gimp_plugin(call)
     print("\n".join(interesting))
     done_line = next((l for l in interesting if l.startswith("COMPOSE DONE")), None)
     if done_line is None or "0 failed" not in done_line:

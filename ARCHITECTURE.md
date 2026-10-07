@@ -63,12 +63,42 @@ fonttools). GIMP batch scripts run under GIMP 2.10's python-fu =
    strip); covers fit the trim; index pages fit the full canvas; landscape
    spreads are upscaled whole (seam consistency) and split at the detected
    gutter into `-1`/`-2` halves.
+   Before the crop, the SOURCE's own printed page number (its original
+   edition's folio) is erased from the in-memory copy — the book draws its
+   own, and left in, the digits also stretch the content box. Detection
+   (`find_folios`) is per ISSUE (file name minus its trailing page
+   number): 1-3 digit-shaped marks at the bottom centre (under each half of
+   a spread), alone on their line on a plain surround, must agree in height
+   and position on ≥3 pages and ≥20% of the issue — scan dust and lettering
+   never do, so issues without folios come back empty. A numbered issue's
+   band then catches the rest of its pages, including numbers printed over
+   artwork (flat near-black/near-white ink, at the side the issue prints
+   that page parity's number). The printed value restarts per issue and is
+   never predicted. Erase (`erase_folios`): on a plain margin or band the
+   digits and their halo take the surround's colour (+ the paper's drift,
+   interpolated, else a faint square shows), keeping anything far from it
+   (a panel border); over artwork the patch is filled in from its edges.
+   The plan is cached in `upscaled/<comic>/folios.json`, keyed on the
+   sources. Because erasing changes the crop, it changes `upscale_spec`'s
+   target size: a book upscaled before this existed has every numbered
+   page re-upscaled on its next run.
+   The content box ignores the scan's EDGE STRIPES (`drop_edge_stripes`):
+   a run of content columns or rows at most 1% of the page wide, touching
+   the scan's edge, a real gap of paper away from the art (gutter shadow,
+   scanner-lid edge). Kept, one holds the crop open on both axes. Once a
+   book is fitted (`relettering/<comic>/layout.json`), `cmd_upscale` never
+   re-upscales an EXISTING page whose expected size changed — upscaled/ is
+   then the cleaned working pages, in the geometry of layout.json and the
+   transcripts — it prints `KEPT:` for a deliberate rebuild instead.
 2. **compose** — the GIMP plugin (`webcomics_compose.py`, versioned copy in
    `gimp-plugin/`) opens `template.xcf` (1875×2775 px @300 dpi = 6.25×9.25"
    with bleed), places the page layer **1:1, centered** (pages arrive
    pre-sized; never upscaled again), paints a background layer in the
    page's paper color, draws the page number, saves the XCF and exports a
-   300 dpi raster PDF. `postprocess_pdf` then recompresses (JPEG) and tags
+   300 dpi raster PDF. The page number is a plain editable text layer
+   ("Page number"), its ink centred between the lowest art edge and the
+   SAFETY line — never in the band below it: printers cut into that band,
+   and the ring the number used to sit in came back clipped. `postprocess_pdf` then recompresses (JPEG) and tags
    sRGB. The 1:1 centered placement means page pixel (x, y) lands at canvas
    `((1875 − W)//2 + x, (2775 − H)//2 + y)` — used by QA to overlay renders
    on source pages exactly.

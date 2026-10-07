@@ -29,7 +29,10 @@ session needs:
   tracked files. Per-comic editorial data = untracked JSONs in
   relettering/<comic>/: typo_fixes.json, layout_overrides.json
   ({"size": N} | {"anchor": "visual"} | {"anchor": "lines"} | {"box":
-  [x0,y0,x1,y1]} | {"lobes": [[x0,y0,x1,y1], ...]}), parts/zz-*.json
+  [x0,y0,x1,y1]} | {"lobes": [[x0,y0,x1,y1], ...]}), fit_policy.json
+  (per-book typographic calls an approved book must not inherit:
+  {"frame_pairs": true} = a split caption pair in a frame is one box),
+  parts/zz-*.json
   transcript overrides (merge order = sorted filename, later wins; keep
   sheets/manifest.json counts in sync).
 - The QA gates and rebuild drivers in relettering/qa-tools/ are PROCESS and
@@ -445,6 +448,98 @@ session needs:
   single balloon's mask commonly runs 1.6-2.9x its walled interior and the
   ordinary path copes — re-finding those moved 14 approved book-2 balloons
   for no gain, two of them worse (crowding a joined balloon).
+- UPSCALE "DONE" IS NOT ONLY A SIZE. The resume check used to compare the
+  output's size alone, and erasing a folio changes the pixels without
+  changing the size wherever the number did not stretch the crop box — 15
+  sources of book 3 kept their pre-erasure outputs, so the fit cleaned
+  pages that still carried their printed numbers (and detection had made
+  an empty bubble of each). An output older than folios.json, on a page the
+  plan erases something from, is stale. The pristine/ copy of such a page is
+  stale too: refresh it (`cp -p`) and re-detect the page.
+- A FOLIO PAGE'S CROP must lose the folio's band: once the number is
+  erased, scan dust left there (a 4px speck on the last row, a stripe at
+  x=0) still held crop_to_content open, so 10 pages kept 50-90px of empty
+  paper and printed their art ~4% smaller than their neighbours.
+  `trim_folio_band` (folio pages only, bottom band + a narrow edge stripe
+  on the sides) fixes exactly those 10 in book 3 and nothing in book 2. A
+  general dust rule in crop_to_content was measured and REFUSED: it moved
+  31 book-3 crops, 53 in approved book 2, 100+ in the UK set.
+  Full-bleed pages (art to the side edges) are width-bound already and
+  cannot print bigger.
+- A SCAN-EDGE STRIPE holds the crop open on BOTH axes: book 3 p205 had 8px
+  of grey gutter shadow at x=0 down its top 555 rows, which kept the left
+  margin AND the top one (art 4% small). `drop_edge_stripes` (in
+  crop_to_content, every page) clears a content run <=1% wide that touches
+  the scan edge a gap away from the art, then re-measures. Narrower than the
+  refused dust rule: 9 pages in approved book 2, 4/3 in comics 3/4, 75 in
+  UK, and 22 in book 3 — 14 by the stripe, 8 by `trim_folio_band` no
+  longer returning early when the bottom is already tight (it skipped its
+  side check there: a 1px speck in from the edge held 8 folio pages ~3%
+  small). Every one grew, to its neighbours' scale; boxes eyeballed.
+- A fitted book's upscaled/ pages ARE the cleaned working pages, so
+  `cmd_upscale` KEEPS (prints `KEPT:`) any existing page whose expected
+  upscale changed once layout.json exists — it used to re-upscale it in
+  place, under a layout, masks and positional transcripts in the old
+  geometry. Rebuilding such a page = re-upscale + remap transcripts through
+  the source + re-letter, by hand.
+- REBUILDING AN APPROVED PAGE IS NOT A RE-FIT. A subset promote keeps
+  entries verbatim, so an approved book's shipped entries can predate even
+  the commit it was approved on: re-fitting 9 book-2 pages on IDENTICAL
+  masks set 5 balloons 1px smaller with worse breaks (a 4-line balloon as a
+  6-line column) — with today's code AND with the approval commit's. Per
+  entry: take the new fit where it is LARGER or identical, otherwise carry
+  the shipped entry through the page-geometry map (old page -> source ->
+  new page: cx and each line box's centre; font, breaks, width unchanged).
+  The balloon only grew, so the shipped lines still fit.
+- Re-upscaling a relettered page changes its scale AND crop origin, so the
+  positional transcripts must be remapped through the SOURCE: old page ->
+  source px (old crop box, old scale) -> new page. Matching on raw or
+  merely scaled block centres mis-pairs a whole page.
+- A joined pair's straight cut is wrong whenever the two blocks OVERLAP
+  on the axis it cuts across (the window between them runs backwards), not
+  only when they overlap on both: 3-047 b03 lost its lines' first letters
+  to its neighbour. Both go to `seam_split`. 8 book-3 pairs take the path;
+  only that one had lost letters, so only that page was re-detected.
+- `sibling_letter_box`: the FIT never writes over a sibling's lettering
+  that a joined balloon's mask covers (2-064 b10 printed its first line on
+  b07's last). The sibling's LETTERS inside the mask, not its block.
+- A GRADED caption box can have too few letters for EITHER letter pass:
+  on its tinted part letter_mask sees letter + fill as one dark blob, on its
+  white part the tint ring test fails, and a two-word time stamp has 7
+  letters against MIN_LETTERS 8 anyway. Detection's graded-box pass takes letters on
+  either ground (BOX_MIN_LETTERS 5) and requires a drawn FRAME on all four
+  sides as the evidence; it only ADDS boxes that overlap no existing entry,
+  so no transcript key moves except by the inserted entry.
+- A FRAME DETECTION ONLY PART-HOLDS is a box too: when the entries cover
+  under FRAME_HELD (0.85) of the frame's rows, `auto_caption_boxes` makes
+  the frame the box. Measured on book 3: every box held whole covers
+  >= 0.90, every reported one 0.67-0.82. Held part-way, the fit got a
+  fraction of the box (text small) and the cleaner, confined to the strip,
+  read white off the pale rows and painted a band across it.
+- `clean_caption_box` finds ink on the MAX channel as well as the min: a
+  saturated yellow's blue channel sits by the ink (89 vs a letter's 65), so
+  the min-channel test missed line ends there, and it also turns up a long
+  band of FILL that a touching letter fused with and was spared as a
+  "curve". Curves are classified per test, and a min-only band never spares
+  what the max channel calls lettering.
+- A balloon whose fill grades ALONG the row (announcer bursts: white glow,
+  blue rim) cannot be repainted with one row median — every old line came
+  back as a too-white band and the letters at the blue ends as white
+  ghosts. `fill_trend` estimates the fill in 2-D from the fill around the
+  lettering, ONLY when the fill strays >= FILL_TREND_MIN from its own row
+  median (white and hologram-striped balloons stay on the row median), and
+  `fill_wall` widens the colour wall by the ground the letters themselves
+  stand on (the blue rim was 56 hue levels off the white glow, one over the
+  wall). A balloon leaked onto sky keeps the plain wall: its letters stand
+  on white.
+- `repair_letter_bites`' "sealed" test reads the window edge as outside, and
+  the rim channel between the eroded mask and the outline runs down a TAIL
+  and out of the window: every rim pocket then counted as a leak (2-053's
+  line end, welded to the arc, survived). Only a narrow opening on the window
+  edge (TAIL_APERTURE) is closed. Do NOT close narrow passages everywhere —
+  tried: 101 masks moved in book 3, and in book 2 the p104/p31/p294 leaks
+  this guard exists for came straight back (they escape through a narrow
+  outline gap, then open out).
 - Two cheap size metrics catch "text too small" before the user does:
   `new_cap_h < old_cap_h` (the balloon demonstrably had room — 18 bubbles
   book-wide, and every page the user reported was among the worst of them),
