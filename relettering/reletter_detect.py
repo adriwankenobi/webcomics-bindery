@@ -66,6 +66,219 @@ def letter_mask(img: np.ndarray) -> np.ndarray:
     return keep[labels].astype(np.uint8)
 
 
+DASH_MIN = 8              # strokes in a dashed outline, at the least
+
+
+def dashed_rings(img: np.ndarray, letters: np.ndarray):
+    """The dashes of DASHED balloon outlines (a whisper), and lines that
+    seal the gaps between them. Returns (ring, seal) masks; both empty on a
+    page without one, and detection then runs exactly as it always did.
+
+    Each dash is a short dark stroke on light ground, so letter_mask takes
+    it for a letter and the paragraph cluster swallows the outline. Worse,
+    the gaps between dashes are irregular — 7px along an arc, over 20px at
+    a corner where a dash runs into the art — and no closing kernel seals
+    them, so where the art around the balloon is near-white (skin, pale
+    sky: 20 levels from the fill, nothing a brightness or colour wall can
+    see) the flood runs out across the page and the cleaner wipes the dashes
+    with the old lettering (10-055).
+
+    A dashed ring is told from lettering by: plain STROKES (a thin bar that
+    fills its own rotated box, at least most of a letter long — an accent
+    is a stroke too, but a short one), at least DASH_MIN of them chained at
+    up to 1.4 letter heights apart, lying OUTSIDE the lettering they run
+    round, on at least 8 of 12 sides of it. The strokes are looked for among
+    every small dark piece on light ground, not only letter_mask's: a dash
+    along the top of an oval is flatter than any letter and letter_mask
+    drops it, and one drawn against the art has less light round it."""
+    ring = np.zeros_like(letters, dtype=np.uint8)
+    seal = np.zeros_like(letters, dtype=np.uint8)
+    nl, _, stl, _ = cv2.connectedComponentsWithStats(letters, 8)
+    if nl - 1 < DASH_MIN:
+        return ring, seal
+    cap = float(np.median(stl[1:, 3]))
+    dark = (img.min(axis=2) <= DARK_MAX).astype(np.uint8)
+    light = img.min(axis=2) >= LIGHT_MIN
+    n, dlab, dst, _ = cv2.connectedComponentsWithStats(dark, 8)
+    keep = np.zeros(n, bool)
+    for i in range(1, n):
+        x, y, w, h, area = dst[i]
+        if not (0.8 * cap <= max(w, h) <= 2 * LETTER_H[1]
+                and 8 <= area <= LETTER_AREA_MAX):
+            continue
+        y0, y1 = max(0, y - 3), min(img.shape[0], y + h + 3)
+        x0, x1 = max(0, x - 3), min(img.shape[1], x + w + 3)
+        keep[i] = (light[y0:y1, x0:x1]
+                   & (dlab[y0:y1, x0:x1] != i)).mean() >= 0.3
+    pieces = letters | keep[dlab].astype(np.uint8)
+    n, lab, st, cen = cv2.connectedComponentsWithStats(pieces, 8)
+    stroke = np.zeros(n, bool)
+    width = np.zeros(n)
+    for i in range(1, n):
+        x, y, w, h = st[i, :4]
+        pts = np.column_stack(np.nonzero(lab[y:y + h, x:x + w] == i))
+        _, (a, b), _ = cv2.minAreaRect(pts[:, ::-1].astype(np.float32))
+        lo, hi = sorted((max(a, 1.0), max(b, 1.0)))
+        stroke[i] = (hi >= 2.5 * lo and hi >= 0.8 * cap
+                     and st[i, 4] >= 0.6 * lo * hi)
+        width[i] = lo
+    if stroke.sum() < DASH_MIN:
+        return ring, seal
+    # chain the strokes ALONE — linked with the lettering, a dash beside a
+    # word joins the paragraph — and reach past a dash lost to the art
+    strokes = stroke[lab].astype(np.uint8)
+    r = int(np.ceil(1.4 * cap))
+    grown = cv2.dilate(strokes, cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1)))
+    _, glab = cv2.connectedComponents(grown, 8)
+    grp = np.zeros(n, int)
+    grp[lab[strokes > 0]] = glab[strokes > 0]
+    for g in np.unique(grp[stroke]):
+        mem = [i for i in range(1, n) if stroke[i] and grp[i] == g]
+        if len(mem) < DASH_MIN:
+            continue
+        xs, ys = cen[mem, 0], cen[mem, 1]
+        inner = [i for i in range(1, n) if not stroke[i]
+                 and xs.min() <= cen[i, 0] <= xs.max()
+                 and ys.min() <= cen[i, 1] <= ys.max()]
+        if len(inner) < 3:
+            continue
+        # a stroke set among the lettering is a letter (I, 1, /). The text
+        # is taken paragraph by paragraph — clusters of 3+ pieces at word
+        # spacing — and a stroke inside any paragraph's hull is a letter.
+        # One hull over all of it would swallow a figure-8's waist dashes,
+        # which lie between its lobes' paragraphs (10-055); a lone piece
+        # (a curved dash at a corner fails the stroke test) is no paragraph
+        isletter = np.zeros(n, bool)
+        isletter[inner] = True
+        rr = int(np.ceil(0.5 * cap))
+        _, plab = cv2.connectedComponents(cv2.dilate(
+            isletter[lab].astype(np.uint8), cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE, (2 * rr + 1, 2 * rr + 1))), 8)
+        para = np.zeros(n, int)
+        para[inner] = plab[cen[inner, 1].astype(int), cen[inner, 0].astype(int)]
+        hulls = []
+        for q in set(para[inner]):
+            pq = [i for i in inner if para[i] == q]
+            if len(pq) >= 3:
+                ys_, xs_ = np.nonzero(np.isin(lab, pq))
+                hulls.append(cv2.convexHull(np.column_stack(
+                    (xs_, ys_)).astype(np.float32)))
+        mem = [i for i in mem if all(cv2.pointPolygonTest(
+            hl, (float(cen[i, 0]), float(cen[i, 1])), True) < -0.25 * cap
+            for hl in hulls)]
+        if len(mem) < DASH_MIN:
+            continue
+        ix, iy = cen[inner, 0].mean(), cen[inner, 1].mean()
+        bins = {int((np.degrees(np.arctan2(cen[i, 1] - iy, cen[i, 0] - ix))
+                     + 180) // 30) % 12 for i in mem}
+        if len(bins) < 8:
+            continue
+        # the dashes of an outline run ALONG it, and round a closed curve
+        # they point every way. Speed lines and a hologram's scan lines also
+        # chain round lettering (2-023, 5-003 in books 2-3), but they are all
+        # parallel. Measured per dash against its nearest neighbour in the
+        # chain, not against the text's centre: a figure-8's lobes each
+        # curve round their own centre (10-055).
+        theta = []
+        for i in mem:
+            x, y, w, h = st[i, :4]
+            ys_, xs_ = np.nonzero(lab[y:y + h, x:x + w] == i)
+            _, (a, b), t = cv2.minAreaRect(np.column_stack(
+                (xs_ + x, ys_ + y)).astype(np.float32))
+            theta.append(np.radians(t if a >= b else t + 90))
+        theta = np.array(theta)
+        pts = cen[mem]
+        along = 0
+        for k in range(len(mem)):
+            d = np.hypot(*(pts - pts[k]).T)
+            d[k] = np.inf
+            j = int(d.argmin())
+            v = (pts[j] - pts[k]) / max(1e-6, d[j])
+            along += abs(np.cos(theta[k]) * v[0]
+                         + np.sin(theta[k]) * v[1]) >= 0.7
+        spread = abs(np.exp(2j * theta).mean())     # 1 = all parallel
+        if along < 0.6 * len(mem) or spread > 0.6:
+            continue
+        # the ring found, it takes in the pieces of outline that are no
+        # plain stroke: two dashes run together into a V at a figure-8's
+        # waist, a dash curled round a tight corner (10-055). Small, clear
+        # of every paragraph, and right beside a dash already in the ring.
+        inring = np.zeros(n, bool)
+        inring[mem] = True
+        near = cv2.distanceTransform(
+            (~inring[lab]).astype(np.uint8), cv2.DIST_L2, 3)
+        big = 3 * float(np.median(st[mem, 4]))
+        for i in range(1, n):
+            if (not inring[i] and st[i, 4] <= big
+                    and near[lab == i].min() <= 0.75 * cap
+                    and all(cv2.pointPolygonTest(
+                        hl, (float(cen[i, 0]), float(cen[i, 1])), True)
+                        < -0.25 * cap for hl in hulls)):
+                mem.append(i)
+        inring[mem] = True
+        ring |= inring[lab].astype(np.uint8)
+        thick = max(3, int(round(np.median(width[mem]))))
+        pts = cen[mem]
+        # join each dash to its nearest neighbours (the arcs), and to the
+        # next one round the ring (the gaps: where the outline runs along a
+        # line of the art its dashes fuse with it and are not strokes any
+        # more, which left 10-055's whole left side open). A joining line
+        # never crosses the lettering — that would wall the text off.
+        dashes = inring[lab]
+        text = cv2.dilate(letters & (1 - dashes).astype(np.uint8),
+                          np.ones((5, 5), np.uint8)) > 0
+        ang = np.arctan2(pts[:, 1] - iy, pts[:, 0] - ix)
+        order = list(np.argsort(ang))
+        pairs = set()
+        for k, p in enumerate(pts):
+            d = np.hypot(*(pts - p).T)
+            d[k] = np.inf
+            pairs |= {(k, int(j)) for j in np.argsort(d)[:2]
+                      if d[j] <= 3.5 * cap}
+        pairs |= {(int(a), int(b)) for a, b in zip(order, order[1:] + order[:1])
+                  if np.hypot(*(pts[a] - pts[b])) <= 5 * cap}
+        for a, b in pairs:
+            line = np.zeros_like(seal)
+            cv2.line(line, (int(pts[a][0]), int(pts[a][1])),
+                     (int(pts[b][0]), int(pts[b][1])), 1, thick)
+            if not (text & (line > 0) & ~dashes).any():
+                seal |= line
+        # ...and each END of a dash to the nearest ink beyond it: where a
+        # dash stops short of a line of the art the outline runs into (the
+        # fused dashes are walled by that line already), the gap between
+        # them is a dash gap like any other — 10-055's top-left corner
+        H, W = letters.shape
+        R = int(np.ceil(1.5 * cap))
+        for i in mem:
+            x, y, w, h = st[i, :4]
+            ys_, xs_ = np.nonzero(lab[y:y + h, x:x + w] == i)
+            box = cv2.boxPoints(cv2.minAreaRect(np.column_stack(
+                (xs_ + x, ys_ + y)).astype(np.float32)))
+            sides = [(box[k] + box[(k + 1) % 4]) / 2 for k in range(4)]
+            lens = [np.hypot(*(box[k] - box[(k + 1) % 4])) for k in range(4)]
+            for k in np.argsort(lens)[:2]:          # the two short sides
+                ex, ey = (int(round(v)) for v in sides[k])
+                x0, y0 = max(0, ex - R), max(0, ey - R)
+                x1, y1 = min(W, ex + R + 1), min(H, ey + R + 1)
+                tgt = ((dark[y0:y1, x0:x1] > 0) & ~text[y0:y1, x0:x1]
+                       & (lab[y0:y1, x0:x1] != i))
+                ty, tx = np.nonzero(tgt)
+                if not len(ty):
+                    continue
+                d = np.hypot(tx + x0 - ex, ty + y0 - ey)
+                j = int(d.argmin())
+                if d[j] > R:
+                    continue
+                line = np.zeros_like(seal)
+                cv2.line(line, (ex, ey), (int(tx[j] + x0), int(ty[j] + y0)),
+                         1, thick)
+                if not (text & (line > 0) & ~dashes).any():
+                    seal |= line
+    seal |= ring
+    return ring, seal
+
+
 def white_letter_mask(img: np.ndarray) -> np.ndarray:
     """Letters of white-on-black caption boxes: white blobs on dark ground."""
     white = (img.min(axis=2) >= 200).astype(np.uint8)
@@ -103,7 +316,7 @@ def paragraph_blocks(letters: np.ndarray,
     return blocks
 
 
-def follow_lobe(comp, bcy, ref, bw):
+def follow_lobe(comp, bcy, ref, bw, text_drift=False):
     """A bubble is horizontally convex and, leaving its widest row, can only
     narrow: walk from the seed row outward, each row following the ONE
     contiguous run that overlaps the previous row's span (never bridging
@@ -134,6 +347,16 @@ def follow_lobe(comp, bcy, ref, bw):
     clipped = np.zeros_like(comp)
     TOL = 3
     start_cx = (start[0] + start[1]) / 2.0
+    # `text_drift`: judge drift against the seed row AND the lettering's own
+    # centre. A burst's spike (or a tail) at the seed row puts that row's
+    # centre well off the text, and measured from it alone the plain rows
+    # above and below "drifted" — 12-082's walk stopped 13px inside the
+    # burst's first line, which was never cleaned and stood behind the new
+    # one. A leak drifts away from both. Only the main per-balloon walk asks
+    # for it: in the short-utterance and joined-lobe passes a longer walk
+    # clears their 1.2x-block area gate where it used to fail, and NEW
+    # entries appear (7 book-4 pages), which renumbers the transcripts.
+    text_cx = (ref[0] + ref[1]) / 2.0 if text_drift else None
     max_drift = max(25, 0.30 * bw)
     for step in (1, -1):
         cur = start
@@ -145,7 +368,9 @@ def follow_lobe(comp, bcy, ref, bw):
             x0, x1 = max(r[0], cur[0] - TOL), min(r[1], cur[1] + TOL)
             if x1 - x0 < 12:
                 break
-            if abs((x0 + x1) / 2.0 - start_cx) > max_drift:
+            if (abs((x0 + x1) / 2.0 - start_cx) > max_drift
+                    and (text_cx is None
+                         or abs((x0 + x1) / 2.0 - text_cx) > max_drift)):
                 break
             clipped[y, x0:x1] = comp[y, x0:x1]
             cur = (x0, x1)
@@ -223,6 +448,57 @@ def seam_split(union, seeds):
             [np.zeros(reg.shape, np.uint8), reg.astype(np.uint8)]
     first = d[0] <= d[1]
     return [(reg & first).astype(np.uint8), (reg & ~first).astype(np.uint8)]
+
+
+def cut_mask(mask, bbox, at, axis, keep_before):
+    """`mask` (whose page origin is bbox[:2]) with one side zeroed at page
+    coordinate `at` — rows when axis is 0, columns when 1 — or None when the
+    cut would leave the lobe with almost nothing.
+
+    The origin to subtract is the one ON THE CUT'S AXIS: bbox[1] (y) for a
+    row cut, bbox[0] (x) for a column cut. Subtracting bbox[axis] — x for a
+    row cut — moved every straight cut by the mask's x-y offset: a cut meant
+    for y=541 on a mask at (295, 354) landed at y=600, inside the lower
+    balloon's first line, which then belonged to no mask, so the cleaner
+    never reached it and the old line stood above the new text.
+
+    None also guards the clamp that keeps a cut clear of the upper/left
+    lobe's own lettering: it can push the cut right past the other lobe's
+    whole mask, and a lobe with an empty mask breaks everything downstream."""
+    off = bbox[1] if axis == 0 else bbox[0]
+    i = max(0, min(mask.shape[axis], at - off))
+    sl = [slice(None), slice(None)]
+    sl[axis] = slice(i, None) if keep_before else slice(0, i)
+    trial = mask.copy()
+    trial[tuple(sl)] = 0
+    if trial.sum() < 0.25 * mask.sum():
+        return None
+    return trial
+
+
+def notch_cut(prof, lo, hi, a_end, b_start):
+    """The straight cut between two joined lobes, as an index into `prof`
+    (the union's width per row, or height per column), or None when there
+    is no waist to cut at.
+
+    The search window [lo, hi) runs a little into both text blocks, which
+    end at `a_end` (the upper/left block's far edge) and start at `b_start`.
+    A narrowest row at an END of the window is not a waist: the profile is
+    still falling toward it. That is a pair whose blocks are offset — the
+    union widens as the second lobe comes in and narrows as the first one
+    ends — and taking the window's end put the cut 10px inside the lower
+    lobe's first line, which then stood uncleaned above the new text. The
+    caller splits such a pair on the seam between the two letterings
+    instead. A real waist still never cuts into either block's lettering:
+    the cut is kept between the blocks."""
+    if hi - lo < 3:
+        return None
+    k = lo + int(np.argmin(prof[lo:hi]))
+    if k in (lo, hi - 1):
+        return None
+    if a_end <= b_start:
+        k = min(max(k, a_end), b_start)
+    return k
 
 
 def strict_bubble(img, letters, bx, by, bw, bh, gutter=None, luma=False,
@@ -423,11 +699,21 @@ def strict_bubble(img, letters, bx, by, bw, bh, gutter=None, luma=False,
 
 
 def detect_page(path: Path):
-    img = cv2.cvtColor(cv2.imread(str(path)), cv2.COLOR_BGR2RGB)
-    h, w = img.shape[:2]
+    page = cv2.cvtColor(cv2.imread(str(path)), cv2.COLOR_BGR2RGB)
+    h, w = page.shape[:2]
+    letters = letter_mask(page)
+    # a dashed outline is a balloon outline, not lettering: drop its dashes
+    # from the letters and draw its gaps shut on a working copy, so every
+    # flood below (the light components, strict_bubble's ink barrier) is
+    # walled by it. The untouched page is what goes back to the caller.
+    dash_ring, seal = dashed_rings(page, letters)
+    img = page
+    if dash_ring.any():
+        letters = letters & (1 - dash_ring)
+        img = page.copy()
+        img[seal > 0] = 0
     light = (img.min(axis=2) >= LIGHT_MIN).astype(np.uint8)
     n, labels, stats, _ = cv2.connectedComponentsWithStats(light, 8)
-    letters = letter_mask(img)
     # pure-white page-wide rows = the gutter between stacked panels (tinted
     # panel fills like pale sky stay below the purity threshold). The
     # outermost rows are scan-edge artifacts, not gutters — flagging them
@@ -451,7 +737,8 @@ def detect_page(path: Path):
         return (closed | (1 - flood))[6:-6, 6:-6]
 
     entries = {}
-    for (bx, by, bw, bh) in paragraph_blocks(letters):
+    pblocks = paragraph_blocks(letters)
+    for (bx, by, bw, bh) in pblocks:
         # bubble = the light component most present just around the block
         y0, y1 = max(0, by - 6), min(h, by + bh + 6)
         x0, x1 = max(0, bx - 6), min(w, bx + bw + 6)
@@ -575,13 +862,22 @@ def detect_page(path: Path):
                    "block": [int(bx), int(by), int(bw), int(bh)],
                    "bbox": [int(cx), int(cy), int(cw), int(ch)],
                    "mask": walked, "paragraphs": 1}
+            if list(host["bbox"]) != new["bbox"]:
+                # the host was FOLDED above: its mask is the re-cropped
+                # union of two balloons, not this component's frame, which
+                # `walked` is in (3-059 crashed combining them)
+                host["mask"], walked, fb = common_frame(
+                    host["mask"], host["bbox"], walked, new["bbox"])
+                host["bbox"] = fb
+                new["bbox"] = list(fb)
+                new["mask"] = walked
             hx0 = host["block"][0]
             hx1 = host["block"][0] + host["block"][2]
             xov = min(bx + bw, hx1) - max(bx, hx0)
             if xov < 0.25 * min(bw, hx1 - hx0):  # side-by-side lobes
                 mini_left = bx + bw / 2.0 < (hx0 + hx1) / 2.0
                 xsplit = (((bx + bw + hx0) // 2 if mini_left
-                           else (hx1 + bx) // 2) - cx)
+                           else (hx1 + bx) // 2) - new["bbox"][0])
                 hostm = np.maximum(host["mask"], walked)
                 lobe = walked.copy()
                 if mini_left:
@@ -610,7 +906,7 @@ def detect_page(path: Path):
         # same lobe-walk as the strict path: keeps the true arcs down to the
         # outline (or panel border) while clamping leaks into gutters
         walked = follow_lobe(interior, by - cy + bh // 2,
-                             (bx - cx, bx - cx + bw), bw)
+                             (bx - cx, bx - cx + bw), bw, text_drift=True)
         if walked is not None and walked.sum() > 1.2 * bw * bh:
             interior = walked
         entries[key] = {"kind": "bubble", "strict": True,
@@ -643,7 +939,16 @@ def detect_page(path: Path):
         bx, by, bw, bh = (int(v) for v in scc[i][:4])
         cnt = int(cv2.connectedComponentsWithStats(
             spare[by:by + bh, bx:bx + bw], 8)[0]) - 1
-        if not (2 <= cnt < MIN_LETTERS and bw >= 30 and 12 <= bh <= 60):
+        if not (2 <= cnt and bw >= 30 and 12 <= bh <= 60):
+            continue
+        # MIN_LETTERS or more only when the WIDE join made the cluster: an
+        # ellipsis between words is too small to be a letter, so "PU...
+        # PUES, YO..." is 2 + 7 letters to paragraph_blocks and 9 here, and
+        # fell between the two passes (16-079 in book 5). A cluster that
+        # already WAS a paragraph block was turned down on its own merits.
+        if cnt >= MIN_LETTERS and any(
+                px < bx + bw and bx < px + pw and py < by + bh and by < py + ph
+                for px, py, pw, ph in pblocks):
             continue
         y0, y1 = max(0, by - 6), min(h, by + bh + 6)
         x0, x1 = max(0, bx - 6), min(w, bx + bw + 6)
@@ -1029,19 +1334,9 @@ def detect_page(path: Path):
         return bool((am & bm).any())
 
     def _cut(e, at, axis, keep_before):
-        """Zero one side of e's mask at page coordinate `at`.
-
-        Skipped when it would leave the lobe with almost nothing: the clamp
-        that keeps the cut clear of the upper/left lobe's own lettering can
-        push it right past the other lobe's whole mask, and a lobe with an
-        empty mask breaks everything downstream."""
-        off = e["bbox"][axis]
-        i = max(0, min(e["mask"].shape[axis], at - off))
-        sl = [slice(None), slice(None)]
-        sl[axis] = slice(i, None) if keep_before else slice(0, i)
-        trial = e["mask"].copy()
-        trial[tuple(sl)] = 0
-        if trial.sum() >= 0.25 * e["mask"].sum():
+        """Zero one side of e's mask at page coordinate `at` (cut_mask)."""
+        trial = cut_mask(e["mask"], e["bbox"], at, axis, keep_before)
+        if trial is not None:
             e["mask"] = trial
 
     def crop_to_mask(e):
@@ -1059,6 +1354,7 @@ def detect_page(path: Path):
     # paragraph keeps its own lobe, and mark them as one group so the
     # typesetter gives both the same font size.
     merged = []
+    merge_pairs = []    # (host, entry) pairs whose masks overlapped
     ngroups = 0
     for e in sorted(entries.values(), key=lambda e: e["block"][1]):
         cands = [m for m in merged
@@ -1073,8 +1369,19 @@ def detect_page(path: Path):
         # a huge light-background entry engulfs every balloon bbox in its
         # panel: prefer the candidate whose MASK truly overlaps (the real
         # joined lobe) so it is the one that gets waist-split below
-        host = next((m for m in cands if masks_overlap(m, e)),
-                    cands[0] if cands else None)
+        # ...and of those, the NEAREST lobe above: in a stack of three joined
+        # balloons each lobe's mask is the union of all three, so the top
+        # lobe "overlaps" the bottom one too, and pairing the bottom lobe
+        # with it cut between those two — straight through the middle
+        # lobe's lettering — and left the middle lobe out of every pair, so
+        # its overlap with the bottom one was never resolved (12-094: the
+        # middle balloon's text was set at 14px against its right edge)
+        overl = [m for m in cands if masks_overlap(m, e)]
+        eby0 = e["block"][1]
+        host = (min(reversed(overl),
+                    key=lambda m: max(0, eby0 - m["block"][1]
+                                      - m["block"][3]))
+                if overl else (cands[0] if cands else None))
         merged.append(e)
         if host is None:
             continue
@@ -1083,6 +1390,7 @@ def detect_page(path: Path):
         host["group"] = e["group"] = gid
         if not masks_overlap(host, e):
             continue  # separate masks already; shared size is all they need
+        merge_pairs.append((host, e))
         hbx, hby, hbw, hbh = host["block"]
         ebx, eby, ebw, ebh = e["block"]
         xov = min(hbx + hbw, ebx + ebw) - max(hbx, ebx)
@@ -1189,10 +1497,18 @@ def detect_page(path: Path):
         if (e.get("group") is not None and e["kind"] == "bubble"
                 and e.get("mask") is not None):
             bygroup.setdefault(e["group"], []).append(e)
-    for g, es in bygroup.items():
-        if len(es) != 2:
-            continue
-        a, b2 = es
+    pairs = [tuple(es) for es in bygroup.values() if len(es) == 2]
+    # ...and every joined pair the merge made, which a CHAIN of three or more
+    # balloons leaves outside any two-member group: each lobe is regrouped
+    # with the next, so the middle one's pair with the lobe above is lost
+    # and their overlap would never be resolved
+    seen = {frozenset((id(p), id(q))) for p, q in pairs}
+    for p, q in merge_pairs:
+        if (frozenset((id(p), id(q))) not in seen
+                and p.get("mask") is not None and q.get("mask") is not None):
+            seen.add(frozenset((id(p), id(q))))
+            pairs.append((p, q))
+    for a, b2 in pairs:
         ux0 = min(a["bbox"][0], b2["bbox"][0])
         uy0 = min(a["bbox"][1], b2["bbox"][1])
         ux1 = max(a["bbox"][0] + a["bbox"][2], b2["bbox"][0] + b2["bbox"][2])
@@ -1282,8 +1598,27 @@ def detect_page(path: Path):
         # makes them "diagonal"); its cleaning, confined to its mask, never
         # reached them and they printed as faint marks beside the new text.
         backwards = (axov > 0 if side else ayov > 0)
-        if diagonal or backwards:
-            # DIAGONAL lobes: the blocks overlap on BOTH axes, so neither a
+        # the straight cut, where the pair has a waist to cut at
+        cut = None
+        if not (diagonal or backwards):
+            if side:
+                first, second = ((a, b2) if a["block"][0] <= b2["block"][0]
+                                 else (b2, a))
+                a_end = first["block"][0] + first["block"][2] - ux0
+                b_start = second["block"][0] - ux0
+                prof = union.sum(axis=0)
+            else:
+                first, second = ((a, b2) if a["block"][1] <= b2["block"][1]
+                                 else (b2, a))
+                a_end = first["block"][1] + first["block"][3] - uy0
+                b_start = second["block"][1] - uy0
+                prof = union.sum(axis=1)
+            lo, hi = a_end - 10, b_start + 10
+            lo, hi = max(0, min(lo, hi)), min(len(prof), max(lo, hi) + 1)
+            cut = notch_cut(prof, lo, hi, a_end, b_start)
+        if cut is None:
+            # ...or no waist between them (notch_cut). DIAGONAL lobes: the
+            # blocks overlap on BOTH axes, so neither a
             # row nor a column separates them and the window below runs
             # BACKWARDS — p294's cut fell at 1954, inside b07's own last
             # line, and the mask lost it (which the cleaner, bounded
@@ -1304,29 +1639,15 @@ def detect_page(path: Path):
             pa, pb = seam_split(union, seeds)
             parts = {id(a): pa > 0, id(b2): pb > 0}
         elif side:
-            left, right = ((a, b2) if a["block"][0] <= b2["block"][0]
-                           else (b2, a))
-            lo = left["block"][0] + left["block"][2] - ux0 - 10
-            hi = right["block"][0] - ux0 + 10
-            lo, hi = max(0, min(lo, hi)), min(union.shape[1], max(lo, hi) + 1)
-            prof = union[:, lo:hi].sum(axis=0)
-            cut = lo + int(np.argmin(prof))
             pl, pr = union.copy(), union.copy()
             pl[:, cut:] = 0
             pr[:, :cut] = 0
-            parts = {id(left): pl, id(right): pr}
+            parts = {id(first): pl, id(second): pr}
         else:
-            upper, lower = ((a, b2) if a["block"][1] <= b2["block"][1]
-                            else (b2, a))
-            lo = upper["block"][1] + upper["block"][3] - uy0 - 10
-            hi = lower["block"][1] - uy0 + 10
-            lo, hi = max(0, min(lo, hi)), min(union.shape[0], max(lo, hi) + 1)
-            prof = union[lo:hi, :].sum(axis=1)
-            cut = lo + int(np.argmin(prof))
             pu, pd = union.copy(), union.copy()
             pu[cut:, :] = 0
             pd[:cut, :] = 0
-            parts = {id(upper): pu, id(lower): pd}
+            parts = {id(first): pu, id(second): pd}
         for e in (a, b2):
             m = parts[id(e)].astype(np.uint8)
             if not m.any():
@@ -1439,13 +1760,34 @@ def detect_page(path: Path):
     # sort by the TEXT BLOCK position (stable across mask changes),
     # matching the order texts were transcribed in
     bubbles.sort(key=lambda b: (b["block"][1], b["block"][0]))
-    return img, bubbles
+    # an entry walled by a dashed ring says so: its mask is already the
+    # sealed interior, and the fit must not "repair" it out to the raw ink
+    # (the dashes ARE that ink, and the cleaner would wipe them)
+    if dash_ring.any():
+        for b in bubbles:
+            x, y, bw, bh = b["bbox"]
+            if dash_ring[max(0, y - 6):y + bh + 6, max(0, x - 6):x + bw + 6].any():
+                b["dashed"] = True
+    return page, bubbles
 
 
 def merge_boxes(a, b):
     x = min(a[0], b[0]); y = min(a[1], b[1])
     return [x, y, max(a[0] + a[2], b[0] + b[2]) - x,
             max(a[1] + a[3], b[1] + b[3]) - y]
+
+
+def common_frame(ma, boxa, mb, boxb):
+    """Two masks, each cropped to its own [x, y, w, h], pasted into the one
+    frame that holds both: (ma', mb', box)."""
+    box = merge_boxes(boxa, boxb)
+    out = []
+    for m, (x, y, _, _) in ((ma, boxa), (mb, boxb)):
+        f = np.zeros((box[3], box[2]), m.dtype)
+        f[y - box[1]:y - box[1] + m.shape[0],
+          x - box[0]:x - box[0] + m.shape[1]] = m
+        out.append(f)
+    return out[0], out[1], [int(v) for v in box]
 
 
 # ported from process.py: classify mostly-paper pages (index/credits vs art)

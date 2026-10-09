@@ -89,6 +89,15 @@ of one by the end.
                           outside.py cannot stand in: it skips `tint` strips
                           and measures against bubble_interior, whose flood on
                           a graded fill is the thing that was mis-detected.
+- `boxleft.py`            old lettering still standing inside a drawn caption
+                          FRAME on the cleaned pages (`PAGES=`, `STEMS=`).
+                          leftover.py is blind to it (a yellow fill is not
+                          light paper) and so is qa_scan (an untouched strip of
+                          a box is identical to pristine): a box detection only
+                          part-found keeps the lines nobody cleaned, with the
+                          new text squeezed in beside them. Healthy: 0. Still
+                          blind to residue already wiped into sub-letter
+                          fragments — look at the box.
 - `welded.py`             stranded lettering FUSED to a drawn line, which
                           leftover.py is blind to by construction (a ring test,
                           and a letter fused to the outline has no ring) and

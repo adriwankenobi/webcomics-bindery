@@ -516,6 +516,40 @@ session needs:
   >= 0.90, every reported one 0.67-0.82. Held part-way, the fit got a
   fraction of the box (text small) and the cleaner, confined to the strip,
   read white off the pale rows and painted a band across it.
+- A SCANNED FRAME IS NOT A RULER: `frame_box` lost 6 book-4 boxes to two
+  drawing faults and every one shipped as a half-wiped box (white band,
+  old letters standing, the last line set small and out of the frame).
+  (1) TILT: a hand-drawn edge drifts 4-6px across the box, and the four-
+  sides test looked for it in a straight band outside the fill's BOUNDING
+  box, so the low end of the edge read as unframed (41%) — `frame_sides`
+  measures from each column's/row's OWN edge of the fill. (2) HAIRLINE:
+  4 columns of a bottom edge scanned 91-93 on the 90 cut-off and the flood
+  ran out into the pale art — `frame_wall` takes pixels up to FRAME_SOFT
+  only where they TOUCH true black. Measured on all four books: 6 new
+  boxes in book 4, 1 in book 3 (already shipping fine), 0 in books 1-2;
+  everything else moves its inner edge by 1px. `qa-tools/boxleft.py` is
+  the gate (shipped 5 -> 0); qa_scan flagged only some of these and
+  missed 10-076 entirely.
+- A DASHED OUTLINE (a whisper) is an outline, not lettering
+  (`dashed_rings` in detection). On near-white art (skin 20 levels from
+  the fill) the dashes are the ONLY wall, and the gaps between them run
+  from 7px on an arc to >21px at a corner where a dash fuses with the art,
+  so no closing kernel seals them (tried 7-21px: 10-055 still flooded the
+  whole arm and the cleaner wiped half the outline). The ring is found as
+  >= 8 plain strokes (most of a letter long, so accents stay letters)
+  chained at <= 1.4 letter heights, outside every PARAGRAPH's hull (one
+  hull over all the text swallows a figure-8's waist), round >= 8 of 12
+  sides, pointing along the chain and every which way (speed lines and
+  hologram scan lines chain round text too, but are parallel — they were
+  the two false rings in books 2-3). Its dashes leave the letter mask and
+  the gaps are drawn shut on a working copy of the page (neighbours, next
+  round the ring, and each dash end to the nearest ink), never across the
+  lettering. The entry is marked `"dashed"`, and the fit then skips the
+  bite repair (it re-flooded to the raw ink, i.e. back over the dashes),
+  protects every dark piece crossing the sealed mask's edge, and skips the
+  overflow inpaint (all that is out there is the outline). No ring = the
+  page detects exactly as before: across all four books it fires on
+  10-055 only.
 - `clean_caption_box` finds ink on the MAX channel as well as the min: a
   saturated yellow's blue channel sits by the ink (89 vs a letter's 65), so
   the min-channel test missed line ends there, and it also turns up a long
@@ -540,6 +574,38 @@ session needs:
   tried: 101 masks moved in book 3, and in book 2 the p104/p31/p294 leaks
   this guard exists for came straight back (they escape through a narrow
   outline gap, then open out).
+- THE JOINED-PAIR CUTS (book 4 round 2). Four faults, each of which left a
+  lobe's first or last line outside every mask (never cleaned, the new text
+  printed over it): (1) `cut_mask` must subtract the origin ON THE CUT'S
+  AXIS — the old `_cut` subtracted bbox[axis] (x for a row cut), so every
+  merge-stage straight cut was off by the mask's x−y offset (10-048: cut
+  meant for y=541 landed at 600); (2) a notch whose narrowest row is the
+  END of the search window is no waist (offset pair) — `notch_cut` returns
+  None and the pair takes `seam_split`; a real waist is kept between the
+  blocks; (3) in a stack of 3+ joined lobes every first mask is the union of
+  all, so the merge host must be the NEAREST lobe above, and every merge
+  pair (not only two-member groups) gets the overlap resolution (12-094);
+  (4) `follow_lobe(text_drift=True)` (main walk ONLY) judges drift against
+  the block centre too — a burst's spike at the seed row stopped the walk
+  inside the first line (12-082). Enabling it in the short-utterance /
+  joined-lobe walks CREATED entries on 7 pages (count change) — refused.
+  Dry-run the whole book after any detection change (count must hold; diff
+  letter coverage per entry) and re-detect only pages that GAIN coverage.
+- `letter_lobes`: a rival entry's letters never re-seed letters this entry
+  already owns — a phantom entry ("" transcript) whose block is one of this
+  entry's paragraphs emptied that lobe and the 3-balloon compound was never
+  re-found (10-041). A recognised strip pair also shares ONE cx (union of
+  its blocks), not just one line grid.
+- An ELLIPSIS splits a short balloon between detection's two passes: the
+  dots are below the letter-blob floor, so "PU... PUES, YO..." is 2 + 7
+  letters to `paragraph_blocks` (each < MIN_LETTERS) and 9 to the
+  short-utterance pass's wider join, which only took clusters UNDER
+  MIN_LETTERS. It now takes MIN_LETTERS or more too, unless the cluster
+  overlaps a paragraph block (that one was refused on its own merits).
+  Book 5: 3 new entries (2 missed balloons + 1 SFX), every other entry
+  identical. Re-detecting would add 3 missed balloons in book 4 (10-077,
+  11-052, 11-088) and split a caption line in book 3 (4-016): do NOT
+  re-detect 4-016.
 - Two cheap size metrics catch "text too small" before the user does:
   `new_cap_h < old_cap_h` (the balloon demonstrably had room — 18 bubbles
   book-wide, and every page the user reported was among the worst of them),

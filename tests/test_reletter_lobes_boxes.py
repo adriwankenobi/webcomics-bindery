@@ -153,6 +153,19 @@ class LetterLobes(unittest.TestCase):
         self.assertLess(max(v[1] for v in lobes[0].values()), 400)
         self.assertEqual(len(jobs), 2)
 
+    def test_neighbour_block_over_our_own_letters_keeps_them_ours(self):
+        # detection also made a phantom entry (empty transcript) whose block
+        # IS one of this entry's paragraphs. Its letters used to be re-seeded
+        # as the neighbour's, the lobe got no pixels and the balloons were
+        # never re-found — two paragraphs printed across both balloons
+        img, block = self._page()
+        b = {"kind": "bubble", "bbox": [20, 20, 720, 320], "block": block}
+        mask = np.ones((320, 720), np.uint8)
+        phantom = [90, 150, 8 * 22 + 15, 2 * 28 + 21]   # the left paragraph
+        got = self.fit.letter_lobes(img, b, mask, 2, [phantom])
+        self.assertIsNotNone(got, "a neighbour's block stole our lettering")
+        self.assertEqual(len(got[1]), 2)
+
     def test_one_balloon_with_a_good_mask_is_left_alone(self):
         img = np.full((300, 500, 3), (240, 170, 110), np.uint8)
         cv2.ellipse(img, (250, 150), (200, 110), 0, 0, 360,
@@ -195,6 +208,39 @@ class FrameBox(unittest.TestCase):
         cv2.ellipse(img, (400, 200), (250, 120), 0, 0, 360, (0, 0, 0), 3)
         blk = letters(img, 290, 170, 10, 2)
         self.assertIsNone(self.fit.frame_box(img, blk, blk))
+
+    def test_tilted_frame_is_found(self):
+        # a hand-drawn frame drifts a few px across its width; checking
+        # for it in a straight band outside the fill's bounding box missed
+        # it along the low end of the edge and rejected the box
+        img = np.full((500, 900, 3), (90, 120, 200), np.uint8)
+        x0, y0, x1, y1, tilt = 100, 100, 700, 300, 6
+        for xx in range(x0, x1):
+            d = round(tilt * (xx - x0) / (x1 - x0))
+            for yy in range(y0 + d, y1 + d):
+                t = (yy - y0 - d) / (y1 - y0 - 1)
+                img[yy, xx] = (255, 235, int(60 + 190 * t))
+        for a, b in (((x0 - 3, y0 - 2), (x1 + 2, y0 + tilt - 2)),
+                     ((x0 - 3, y1 + 1), (x1 + 2, y1 + tilt + 1)),
+                     ((x0 - 2, y0 - 2), (x0 - 2, y1 + 1)),
+                     ((x1 + 1, y0 + tilt - 2), (x1 + 1, y1 + tilt + 1))):
+            cv2.line(img, a, b, (0, 0, 0), 3)
+        blk = letters(img, 150, 230, 12, 2)
+        r = self.fit.frame_box(img, blk, blk)
+        self.assertIsNotNone(r, "a frame tilted by a few px was rejected")
+
+    def test_frame_with_a_hairline_light_gap_is_found(self):
+        # a few columns of the frame scanned a level or two lighter than
+        # FRAME_MAX: the flood escaped through them into pale art and the
+        # whole box was lost
+        img = np.full((500, 900, 3), (230, 230, 230), np.uint8)
+        framed_box(img, 100, 100, 700, 300)
+        img[299:306, 300:303] = (92, 92, 92)
+        blk = letters(img, 150, 230, 12, 2)
+        r = self.fit.frame_box(img, blk, blk)
+        self.assertIsNotNone(r, "a 3px light gap in the frame lost the box")
+        self.assertTrue(all(abs(a - b) <= 2 for a, b in
+                            zip(r, (100, 100, 700, 300))), r)
 
     def test_art_inside_the_frame_is_not_a_caption(self):
         img = np.full((500, 900, 3), (230, 230, 230), np.uint8)

@@ -260,3 +260,25 @@ class SiblingLetters(unittest.TestCase):
         me = {"kind": "bubble", "bbox": [50, 50, 500, 300], "block": lower}
         self.assertIsNone(self.fit.sibling_letter_box(
             img, me, 1, np.ones((300, 500), np.uint8), [me]))
+
+
+@unittest.skipUnless(HAVE_CV2, "cv2 only in .venv-reletter")
+class FoldedHostFrame(unittest.TestCase):
+    """A host folded over two balloons carries a re-cropped mask; a later
+    block in the same light component walks in the COMPONENT's frame. Both
+    have to land in one frame before they are combined (3-059 crashed)."""
+
+    def test_masks_meet_in_one_frame(self):
+        d = load_detect()
+        host = np.zeros((283, 692), np.uint8)
+        host[0, 0] = 1                       # page (584, 1579)
+        walked = np.zeros((359, 761), np.uint8)
+        walked[358, 760] = 1                 # page (1328, 1937)
+        hm, wm, box = d.common_frame(host, [584, 1579, 692, 283],
+                                     walked, [568, 1579, 761, 359])
+        self.assertEqual(box, [568, 1579, 761, 359])
+        self.assertEqual(hm.shape, wm.shape)
+        self.assertEqual(hm.shape, (359, 761))
+        self.assertEqual(hm[0, 584 - 568], 1)
+        self.assertEqual(wm[358, 760], 1)
+        self.assertEqual(int(hm.sum()) + int(wm.sum()), 2)

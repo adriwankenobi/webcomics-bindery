@@ -92,6 +92,8 @@ MAX_PIECES = 3          # most fragments one hyphenated word may become
 TEXT_INSET = 5
 TRACK_MAX_FRAC = 0.05   # tightest tracking, as a fraction of the em
 FRAME_MAX = 90          # a drawn frame is dark in EVERY channel
+FRAME_SOFT = 130        # a frame pixel scanned this light still walls the
+                        # flood, where it TOUCHES true black (frame_wall)
 TAIL_APERTURE = 12      # px: an opening on the repair window's edge this
                         # narrow is a tail's rim channel, not a leak
 FRAME_HELD = 0.85      # share of a frame's rows detection must cover, or
@@ -1535,12 +1537,19 @@ def letter_lobes(img, b, mask, n, others=(), paras=None):
         for (lx, ly, lw, lh) in g:
             seeds[max(0, ly - Y0):ly - Y0 + lh,
                   max(0, lx - X0):lx - X0 + lw] = t
+    # ...but never a letter this entry already owns: detection can leave a
+    # phantom entry (empty transcript) whose block IS one of this entry's
+    # paragraphs, and re-seeding those letters as the neighbour's left that
+    # lobe with no pixels at all, so the balloons were never re-found and
+    # two paragraphs printed straight across both of them (10-041 b06)
     for (ox, oy, ow, oh) in rivals:
         for (lx, ly, lw, lh) in block_letters(img, (ox, oy, ow, oh)):
             if uni[min(dark.shape[0] - 1, max(0, ly - Y0 + lh // 2)),
                    min(dark.shape[1] - 1, max(0, lx - X0 + lw // 2))]:
-                seeds[max(0, ly - Y0):ly - Y0 + lh,
-                      max(0, lx - X0):lx - X0 + lw] = n + 1
+                sl = (slice(max(0, ly - Y0), ly - Y0 + lh),
+                      slice(max(0, lx - X0), lx - X0 + lw))
+                if not seeds[sl].any():
+                    seeds[sl] = n + 1
     if n == 1 and not (seeds == 2).any():
         inters = floods             # one balloon, no one else's letters
     else:
@@ -2226,6 +2235,14 @@ def clean_bubble(img, b, mask, allowed_ys=None):
             cw, ch, ca = stc[ci, 2], stc[ci, 3], stc[ci, 4]
             if _curve(cw, ch, ca):
                 protect[lab == ci] = True
+        # A DASHED outline is no long curve — every dash is compact — but
+        # detection sealed this entry's mask along the dashes, so its
+        # letters are islands in the fill and anything dark that crosses the
+        # mask's edge is outline: a dash at a figure-8's waist, where the
+        # row walk squares the mask off across the notch (10-055).
+        if b.get("dashed"):
+            out = np.unique(lab[(keep_ring == 0) & (dark > 0)])
+            protect |= np.isin(lab, out[out > 0])
         # ...but the lettering runs right up to the outline, and at the ink
         # threshold a letter that TOUCHES it is ONE component with it — so
         # the curve test spared the letter too, and it printed beside the
@@ -2370,7 +2387,11 @@ def clean_bubble(img, b, mask, allowed_ys=None):
         ox0, oy0 = max(0, bx2 - 8, x), max(0, by2 - 8, y)
         ox1 = min(img.shape[1], bx2 + bw2 + 8, x + w)
         oy1 = min(img.shape[0], by2 + bh2 + 8, y + h)
-        if ox1 - ox0 < 8 or oy1 - oy0 < 8:
+        # ...and never round a DASHED outline: detection sealed the mask
+        # along the dashes, so the lettering is all inside it, and what is
+        # dark and letter-sized just outside it is the dashes themselves —
+        # the pass inpainted a figure-8's waist dashes away (10-055)
+        if ox1 - ox0 < 8 or oy1 - oy0 < 8 or b.get("dashed"):
             return
         oreg = img[oy0:oy1, ox0:ox1]
         covered = np.zeros(img.shape[:2], np.uint8)
@@ -2633,7 +2654,7 @@ def _frame_box(img, block, bbox, mx, my):
     if bw <= 0 or bh <= 0:
         return None
     reg = img[Y0:Y1, X0:X1]
-    dark = reg.max(axis=2) <= FRAME_MAX
+    dark = frame_wall(reg)
     _, lab = cv2.connectedComponents((~dark).astype(np.uint8), 4)
     sub = lab[by - Y0:by + bh - Y0, bx - X0:bx + bw - X0]
     vals, cnt = np.unique(sub[sub > 0], return_counts=True)
@@ -2660,13 +2681,50 @@ def _frame_box(img, block, bbox, mx, my):
     if any(st[i, 3] > 70 for i in range(1, k)):
         return None
     # and a frame really is drawn round it, on all four sides
-    sides = (dark[max(0, y0 - 6):y0, x0:x1].any(axis=0).mean(),
-             dark[y1:y1 + 6, x0:x1].any(axis=0).mean(),
-             dark[y0:y1, max(0, x0 - 6):x0].any(axis=1).mean(),
-             dark[y0:y1, x1:x1 + 6].any(axis=1).mean())
-    if min(sides) < 0.85:
+    if min(frame_sides(dark, solid)) < 0.85:
         return None
     return (X0 + int(x0), Y0 + int(y0), X0 + int(x1), Y0 + int(y1))
+
+
+def frame_wall(reg):
+    """The ink that walls a caption box's fill: true black, plus the
+    pixels a little lighter than that which TOUCH it. A scanned frame is
+    not uniformly black — a few columns of one edge came back 91-93 on
+    a 90 cut-off (8-006), the flood ran out through that hairline into
+    the pale art beside the box and the box was lost. Taking the lighter
+    pixels only where they are attached to true black seals such a gap
+    without letting a mid-grey stroke in the art pass for a frame."""
+    core = reg.max(axis=2) <= FRAME_MAX
+    soft = (reg.max(axis=2) <= FRAME_SOFT).astype(np.uint8)
+    k, lab = cv2.connectedComponents(soft, connectivity=8)
+    keep = np.zeros(k, bool)
+    keep[np.unique(lab[core])] = True
+    keep[0] = False
+    return keep[lab]
+
+
+def frame_sides(dark, solid, reach=6):
+    """Share of each side of the fill `solid` (top, bottom, left, right)
+    with frame ink within `reach` px outside it. Measured from each
+    column's (row's) OWN edge of the fill: a hand-drawn frame drifts a
+    few px across its width, and a band laid outside the fill's bounding
+    box missed it along the low end of a tilted edge (8-009's top edge
+    drops 4px across the box, and only 41% of it was "framed")."""
+    H, W = solid.shape
+    cols = np.nonzero(solid.any(axis=0))[0]
+    rows = np.nonzero(solid.any(axis=1))[0]
+    top = solid[:, cols].argmax(axis=0)
+    bot = H - solid[::-1, cols].argmax(axis=0)
+    lft = solid[rows].argmax(axis=1)
+    rgt = W - solid[rows, ::-1].argmax(axis=1)
+    return (np.mean([dark[max(0, t - reach):t, c].any()
+                     for c, t in zip(cols, top)]),
+            np.mean([dark[b:b + reach, c].any()
+                     for c, b in zip(cols, bot)]),
+            np.mean([dark[r, max(0, a - reach):a].any()
+                     for r, a in zip(rows, lft)]),
+            np.mean([dark[r, b:b + reach].any()
+                     for r, b in zip(rows, rgt)]))
 
 
 def auto_caption_boxes(stem, img, bubbles, texts):
@@ -2915,7 +2973,11 @@ def prepare_bubble(stem, bi, b, img, texts, bubbles, cap_box, cap_mem):
     # Caption boxes are exempt: their fill legitimately shifts hue, so
     # the flood's colour wall has nothing to hold on to, and the box
     # path drives its own profile anyway.
-    if (b["kind"] == "bubble" and b.get("strict")
+    # Not for a DASHED outline (detection marks it): its mask is the
+    # interior detection sealed shut along the dashes, and re-flooded with
+    # the raw ink as the wall, every dash at the rim came back as a pocket
+    # of the mask — the cleaner then wiped half the outline (10-055).
+    if (b["kind"] == "bubble" and b.get("strict") and not b.get("dashed")
             and bi not in cap_members and forced_lobes is None):
         bxr, byr, bwr, bhr = b["block"]
         mask = repair_letter_bites(
@@ -3392,9 +3454,17 @@ def typeset_page(fit, path, pending, clean_jobs, img, bubbles, book,
                + max(bl[1] + bl[3] for bl in blocks)) / 2.0
         ys = stack_box_lines([(m, len(byi[m]["lines"])) for m in mem],
                              lhs.pop(), cyb)
+        # ...and on ONE axis: each strip's lines were centred on that
+        # strip's own block, and where the letterer set the box flush left
+        # the last strip holds a short line whose block sits far left — the
+        # box printed its last line 113-158px off the others' axis (8-008,
+        # 8-016)
+        cxb = (min(bl[0] for bl in blocks)
+               + max(bl[0] + bl[2] for bl in blocks)) / 2.0
         for m in mem:
             for ln, yy in zip(byi[m]["lines"], ys[m]):
                 ln["y_top"] = round(yy, 1)
+                ln["cx"] = round(cxb, 1)
     layout[path.stem] = page_entries
     # clean ONLY bubbles that got a layout entry (a fit failure must
     # never blank a bubble)
