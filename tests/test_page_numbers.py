@@ -48,6 +48,23 @@ class NumbersFile(unittest.TestCase):
         # no source for the spread half: no number, no measured colour
         self.assertEqual(lines[4], "Comic 003-1.jpg\t-\t-")
 
+    def test_a_paper_override_wins_over_the_measured_colour(self):
+        # full-bleed art in one flat colour reads as paper: the editor
+        # overrides that page's margins, the others stay measured
+        (self.comic / "Comic 004.jpg").write_bytes(b"")
+        files = [Path("Comic 002.jpg"), Path("Comic 004.jpg")]
+        with mock.patch.object(process, "template_geometry",
+                               return_value=GEOMETRY), \
+                mock.patch.object(process, "paper_color",
+                                  return_value=(1, 118, 162)), \
+                mock.patch.object(process, "paper_overrides",
+                                  return_value={"Comic 004.jpg":
+                                                (255, 255, 255)}):
+            out = process.write_numbers_file(files, {}, self.comic, self.xcf)
+        lines = out.read_text().splitlines()
+        self.assertEqual(lines[3], "Comic 002.jpg\t-\t1,118,162")
+        self.assertEqual(lines[4], "Comic 004.jpg\t-\t255,255,255")
+
 
 if __name__ == "__main__":
     unittest.main()

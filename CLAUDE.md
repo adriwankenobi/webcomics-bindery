@@ -606,6 +606,22 @@ session needs:
   identical. Re-detecting would add 3 missed balloons in book 4 (10-077,
   11-052, 11-088) and split a caption line in book 3 (4-016): do NOT
   re-detect 4-016.
+- A token with no letter in it ("...", "¡...", "--") is a word of its own
+  to the wrap, and the balance pass broke after it: 12 balloons in book 5
+  printed a lone "..." over their first line. `glue_bare_punct` (end of
+  `parse_runs`) glues it to the next word (the last one to the word
+  before), and `split_word` never breaks at or beside the glue.
+- `notch_cut` judges "no waist" on the profile's VALUE: a plateau running
+  to the window's end has its first minimum a few px short of the end, so
+  the index test let it through and the cut was clamped onto the second
+  block's start — the leading "..." (no letters, so outside the block)
+  went to the other lobe. Book 5: 6 pages change, only p38 has text there.
+- Margin color: art that runs to all four edges in one flat colour (sky,
+  sea) reads as PAPER and the margins come out that colour. The rule is
+  kept (coloured stock, dark pages, the UK set's borders); per-page
+  override in untracked `upscaled/<comic>/paper_overrides.json`
+  ({source filename: [r,g,b]}), read when compose writes numbers.txt —
+  delete the page's .xcf/.pdf to recompose it.
 - Two cheap size metrics catch "text too small" before the user does:
   `new_cap_h < old_cap_h` (the balloon demonstrably had room — 18 bubbles
   book-wide, and every page the user reported was among the worst of them),

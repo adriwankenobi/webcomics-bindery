@@ -81,6 +81,16 @@ class NotchCut(unittest.TestCase):
         n = len(prof)
         self.assertIsNone(self.det.notch_cut(prof, 0, n, 10, n - 11))
 
+    def test_a_plateau_at_the_window_end_is_no_waist(self):
+        # the union narrows into the second lobe and stays at its height to
+        # the window's end: the first minimum sits a few px short of the
+        # end, which passed the index test and clamped the cut onto the
+        # second block's start — its leading "..." went to the other lobe
+        prof = np.array([93] * 17 + list(range(114, 129)) + [98, 81]
+                        + [70] * 4 + [66] * 6)
+        n = len(prof)
+        self.assertIsNone(self.det.notch_cut(prof, 0, n, 10, n - 11))
+
     def test_cut_never_lands_inside_a_block(self):
         # the narrowest row sits 4px inside the lower block: the cut moves
         # to the block's edge, never into its lettering

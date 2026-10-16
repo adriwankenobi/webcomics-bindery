@@ -396,6 +396,52 @@ class EmphasisGluedToPunctuation(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_CV2, "cv2 only in .venv-reletter")
+class BarePunctuationNeverStandsAlone(unittest.TestCase):
+    """A leading "..." is a word of its own to the wrap, and the balance pass
+    broke after it: the balloon printed a lone "..." over "EJECUTADLOS." and
+    took two lines (and a smaller size) where the original used one."""
+
+    def setUp(self):
+        self.fit = load_fit()
+        self.f = self.fit.Fitter()
+
+    def test_leading_ellipsis_is_glued_to_the_next_word(self):
+        self.assertEqual(self.fit.parse_runs("... EJECUTADLOS."),
+                         [("regular", "... EJECUTADLOS.")])
+        self.assertEqual(self.fit.parse_runs("¡... ESTA COLUMNA")[0],
+                         ("regular", "¡... ESTA"))
+
+    def test_the_glued_token_takes_the_emphasis(self):
+        self.assertEqual(self.fit.parse_runs("... *SARGENTO* SERÍA")[0],
+                         ("bolditalic", "... SARGENTO"))
+
+    def test_trailing_bare_token_joins_the_word_before(self):
+        self.assertEqual(self.fit.parse_runs("HOLA ...")[-1],
+                         ("regular", "HOLA ..."))
+
+    def test_a_lone_ellipsis_balloon_is_left_alone(self):
+        self.assertEqual(self.fit.parse_runs("..."), [("regular", "...")])
+
+    def test_wrap_never_sets_the_dots_on_their_own_line(self):
+        rows = {y: (0, 200) for y in range(0, 200)}
+        words = self.fit.parse_runs("... SARGENTO BRILLANTE SERÍA LA "
+                                    "DENOMINACIÓN APROPIADA.")
+        lines = self.fit.wrap_at(self.f, words, rows, 23, 100, set())
+        self.assertIsNotNone(lines)
+        for _, _, _, runs in lines:
+            text = " ".join(w for _, w in runs)
+            self.assertTrue(any(c.isalnum() for c in text), text)
+
+    def test_hyphenation_never_breaks_at_the_glue(self):
+        sp = self.fit.split_word(self.f, "regular", "... PERPENDICULARES",
+                                 23, 120)
+        self.assertIsNotNone(sp)
+        head, tail = sp
+        self.assertTrue(head.startswith("... ") and len(head) > 6, head)
+        self.assertNotIn(" ", tail)
+
+
+@unittest.skipUnless(HAVE_CV2, "cv2 only in .venv-reletter")
 class OverflowInpaintStaysOnItsBalloon(unittest.TestCase):
     """The overflow inpaint must never reach a NEIGHBOURING balloon.
 

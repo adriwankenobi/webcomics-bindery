@@ -149,7 +149,34 @@ def parse_runs(text: str) -> list:
             cur_emph = cur_emph or st
     if cur:
         words.append(("bolditalic" if cur_emph else "regular", "".join(cur)))
-    return words
+    return glue_bare_punct(words)
+
+
+def glue_bare_punct(words: list) -> list:
+    """A token with no letter or digit in it ("...", "¡...", "--") is glued
+    to the word after it — or, at the end, to the word before — so the wrap
+    can never set it on a line of its own. As a word of its own the balance
+    pass happily broke "... EJECUTADLOS." after the dots, and the bubble
+    printed a lone "..." over the line it belongs to (and, needing two lines
+    where the original used one, set it several sizes small). The glued
+    token takes the emphasis if either side has it, like any token."""
+    def bare(w):
+        return not any(c.isalnum() for c in w)
+    out = list(words)
+    i = 0
+    while len(out) > 1 and i < len(out):
+        st, w = out[i]
+        if not bare(w):
+            i += 1
+            continue
+        j = i + 1 if i + 1 < len(out) else i - 1
+        st2, w2 = out[j]
+        style = "bolditalic" if "bolditalic" in (st, st2) else "regular"
+        a, b = (w, w2) if j > i else (w2, w)
+        out[min(i, j)] = (style, a + " " + b)
+        del out[max(i, j)]
+        i = min(i, j)
+    return out
 
 
 class Fitter:
@@ -298,6 +325,13 @@ def split_word(fit, style, word, size, limit):
     for i in range(2, len(word) - 1):
         if fit.word_width(style, word[:i] + "-", size) > limit:
             break
+        if " " in word:
+            # a glued "... WORD" (glue_bare_punct): break inside the word
+            # itself, never at or beside the space
+            if (" " in word[i - 1:i + 1]
+                    or sum(c.isalpha() for c in word[:i].split(" ")[-1]) < 2
+                    or sum(c.isalpha() for c in word[i:].split(" ")[0]) < 2):
+                continue
         fits.append(i)
     if not fits:
         return None

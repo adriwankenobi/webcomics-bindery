@@ -21,6 +21,7 @@ import argparse
 import subprocess
 import sys
 import time
+import unicodedata
 from pathlib import Path
 
 from PIL import Image
@@ -1271,6 +1272,24 @@ def page_numbers(in_dir: Path, comic_dir: Path) -> tuple:
     return files, numbers
 
 
+PAPER_OVERRIDES = "paper_overrides.json"
+
+
+def paper_overrides(comic_dir: Path) -> dict:
+    """{source filename: [r, g, b]} from upscaled/<comic>/paper_overrides.json
+    — the editor's call on a page whose measured paper color is wrong. Art
+    that runs to all four edges in one flat color (a sky, a sea) reads as
+    paper, so the margins come out that color; the rule is right for a
+    page printed on colored stock and for dark pages, so it is overridden
+    per page, never bent."""
+    import json
+    f = REPO / "upscaled" / Path(comic_dir).name / PAPER_OVERRIDES
+    if not f.is_file():
+        return {}
+    return {unicodedata.normalize("NFC", k): tuple(v)
+            for k, v in json.loads(f.read_text()).items()}
+
+
 def write_numbers_file(files: list, numbers: dict, comic_dir: Path,
                        xcf_dir: Path) -> Path:
     """Per-page metadata for the plugin (xcf_dir/numbers.txt): page number
@@ -1282,10 +1301,15 @@ def write_numbers_file(files: list, numbers: dict, comic_dir: Path,
     lines = [f"ART_BOTTOM {(canvas_size()[1] + story_box()[1]) // 2}",
              f"SAFETY_BOTTOM {safety_bottom_y()}",
              f"STRIP_BOTTOM {strip_bottom_y()}"]
+    overrides = paper_overrides(comic_dir)
     for f in files:
         num = numbers.get(f.name, "-")
         src = source_of(f, comic_dir)
-        rgb = ",".join(map(str, paper_color(src))) if src else "-"
+        if src is None:
+            rgb = "-"
+        else:
+            color = overrides.get(unicodedata.normalize("NFC", src.name))
+            rgb = ",".join(map(str, color or paper_color(src)))
         lines.append(f"{f.name}\t{num}\t{rgb}")
     numbers_file = xcf_dir / "numbers.txt"
     numbers_file.write_text("\n".join(lines) + "\n")

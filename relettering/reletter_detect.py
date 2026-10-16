@@ -494,7 +494,12 @@ def notch_cut(prof, lo, hi, a_end, b_start):
     if hi - lo < 3:
         return None
     k = lo + int(np.argmin(prof[lo:hi]))
-    if k in (lo, hi - 1):
+    # judged on the VALUE, not the index: a profile that bottoms out in a
+    # plateau running to the window's end has its first minimum a few px
+    # short of the end, and that passed for a waist — the cut was clamped
+    # to the second block's start and the leading "..." (too small to be a
+    # letter, so outside the block) went to the other lobe (5-047 b02)
+    if prof[k] >= prof[lo] or prof[k] >= prof[hi - 1]:
         return None
     if a_end <= b_start:
         k = min(max(k, a_end), b_start)
