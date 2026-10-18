@@ -8,26 +8,42 @@ import re
 import sys
 from pathlib import Path
 
-import cv2
-import numpy as np
-
 REPO = Path(__file__).resolve().parent.parent
-if len(sys.argv) < 2:
-    sys.exit('usage: make_sheets.py "<comic folder name>"')
-COMIC = sys.argv[1]
-WORK = REPO / "relettering" / COMIC
-BUB = WORK / "bubbles"
-SHEETS = WORK / "sheets"
 MAXW, MAXH = 880, 2350
 
 
 def short_key(stem: str) -> str:
-    # "<series> N - <title> PPP" -> "N-PPP"; fall back to the full stem
-    m = re.match(r"^\D*(\d+)\b.*?(\d+(?:-\d)?)$", stem)
+    # "<series> N - <title> PPP" -> "N-PPP"; fall back to the full stem.
+    # A dotted issue number ("UK 6.29 002") is kept whole: "6.29-002",
+    # letter suffix included ("UK 7.02a 003" -> "7.02a-003").
+    m = re.match(r"^\D*(\d+(?:\.\d+[a-z]?)?)\b.*?(\d+(?:-\d)?)$", stem)
     return f"{m.group(1)}-{m.group(2)}" if m else stem
 
 
+def check_unique(counts: dict) -> None:
+    """{stem: bubble count}. The transcripts are keyed on short_key, so two
+    pages with bubbles sharing one would silently overwrite each other."""
+    seen = {}
+    for stem, n in counts.items():
+        if not n:
+            continue
+        key = short_key(stem)
+        if key in seen:
+            sys.exit(f"make_sheets: pages {seen[key]!r} and {stem!r} both "
+                     f"map to key {key!r} — fix short_key")
+        seen[key] = stem
+
+
 def main():
+    import cv2
+    import numpy as np
+    if len(sys.argv) < 2:
+        sys.exit('usage: make_sheets.py "<comic folder name>"')
+    WORK = REPO / "relettering" / sys.argv[1]
+    BUB = WORK / "bubbles"
+    SHEETS = WORK / "sheets"
+    check_unique({j.stem: len(json.loads(j.read_text()))
+                  for j in sorted(BUB.glob("*.json"))})
     SHEETS.mkdir(exist_ok=True)
     for old in SHEETS.glob("sheet-*.jpg"):
         old.unlink()

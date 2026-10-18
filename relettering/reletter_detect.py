@@ -1044,6 +1044,14 @@ def detect_page(path: Path):
                                  (bx - ox, bx - ox + bw), bw)
         if walked is None or walked.sum() < 1.2 * bw * bh:
             continue
+        if list(host["bbox"]) != [ox, oy, ow, oh]:
+            # the host was FOLDED by the main pass: its mask is the
+            # re-cropped union of two balloons, not this component's frame,
+            # which `walked` is in (6.38-002 crashed combining them)
+            host["mask"], walked, fb = common_frame(
+                host["mask"], host["bbox"], walked, [ox, oy, ow, oh])
+            host["bbox"] = fb
+            ox, oy, ow, oh = fb
         cx, cy = ox, oy
         hx0 = host["block"][0]
         hx1 = host["block"][0] + host["block"][2]

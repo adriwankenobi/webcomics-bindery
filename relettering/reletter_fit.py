@@ -128,11 +128,17 @@ def parse_runs(text: str) -> list:
 
     Runs are word level and the renderer sets a space between them, so one
     word cannot carry two styles: a token that is emphasised anywhere keeps
-    its attached punctuation and takes the emphasis style."""
+    its attached punctuation and takes the emphasis style.
+
+    '\\*' is a literal asterisk (a footnote mark) and never toggles."""
     marked, emph, i = [], False, 0
     while i < len(text):
         ch = text[i]
-        if ch == "*" and (emph or text.find("*", i + 1) != -1):
+        if text.startswith("\\*", i):
+            marked.append(("*", emph))
+            i += 2
+            continue
+        if ch == "*" and (emph or "*" in text[i + 1:].replace("\\*", "")):
             emph = not emph          # a lone, unmatched '*' stays literal
         else:
             marked.append((ch, emph))
@@ -2557,9 +2563,10 @@ def unfound_balloon(img, b):
 # time (transcripts.json stays a verbatim record of the source). Per-comic
 # data: relettering/<comic>/typo_fixes.json, a list of [wrong, fixed] pairs
 def override_key(stem: str, bi: int) -> str:
-    import re as _re
-    m = _re.match(r"^\D*(\d+)\b.*?(\d+(?:-\d)?)$", stem)
-    return f"{m.group(1)}-{m.group(2)} b{bi:02d}" if m else f"{stem} b{bi:02d}"
+    # the transcripts' own key (make_sheets.short_key) — never a copy of its
+    # regex: a stale one collapsed the UK set's "6.29" issues onto "6"
+    from make_sheets import short_key
+    return f"{short_key(stem)} b{bi:02d}"
 
 
 def override_for(stem: str, bi: int):

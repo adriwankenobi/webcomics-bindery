@@ -35,6 +35,12 @@ session needs:
   parts/zz-*.json
   transcript overrides (merge order = sorted filename, later wins; keep
   sheets/manifest.json counts in sync).
+- The docs (this file, README.md, ARCHITECTURE.md, the qa-tools README)
+  explain HOW things work and WHY — never which comic, book, page or bubble
+  showed it, incident counts, round numbers, dates or quoted dialogue. That
+  evidence belongs in commit messages; per-book state belongs in memory.
+  Tests use placeholder names ("Series 13 - Title 012"), never real titles
+  or transcript text.
 - The QA gates and rebuild drivers in relettering/qa-tools/ are PROCESS and
   are tracked (whitelisted by name in .gitignore); the eyeball helpers
   beside them (crop/zoom/montage/...) are scratch and stay untracked. They
@@ -44,7 +50,10 @@ session needs:
 - `just process "<comic>" --relettering` = the whole re-lettered book in
   one resumable run; it pauses once (`== TRANSCRIPTION NEEDED ==`, Enter or
   re-run to resume). Markers: pristine/ (skipped once layout.json exists),
-  bubbles/*.json, sheets/manifest.json, all manifest keys in parts/,
+  bubbles/<stem>.json for EVERY page (a partial set = an interrupted
+  detection, never "done": it re-runs whole while no transcripts exist and
+  is refused after — "any json = done" once made sheets for a fraction of a
+  book), sheets/manifest.json, all manifest keys in parts/,
   layout.json — detection and the fit are NEVER re-run by the driver — and
   for the GIMP text pass qa/<stem>.png newer than the .xcf (delete the PNG
   to force one page; a recompose forces it too, so the single-page recipe
@@ -104,19 +113,19 @@ session needs:
   drawn ink CLOSED by a 7x7 kernel (to seal outline gaps), so a letter within
   ~7px of the outline is WELDED to it: no longer an enclosed hole, so the
   hole-fill leaves a BITE, and a line that all but spans the balloon seals
-  whole regions off the interior (p65 b08: the fit saw 127px of a 252px
-  balloon and dropped 4 size steps; p88 b06 landed BELOW the original's own
-  size). Both user-visible halves come from this one fault — small text that
-  does not fill the balloon, AND the letters inside the bite never being
-  cleaned (the cleaner is confined to the mask), which read as "little almost
-  white objects". `repair_letter_bites` re-floods with the RAW ink as the
-  only wall and adds back only what the mask and the ink ALREADY ENCLOSE (a
-  bite is a pocket; a leak is enclosed by nothing). Bounding it to the
-  letterer's block is NOT enough on its own: the blob cluster reaches past
-  the balloon's own arc, so p104's escape onto pale sky landed INSIDE the
-  block — the cleaner then read the fill off sky, painted blue over the
-  artwork and left the old lettering standing. An area ratio cannot see it
-  either: that escape was 1.7% of the mask.
+  whole regions off the interior — the fit then sees a fraction of the
+  balloon and drops several size steps, even below the original's own size.
+  Both visible symptoms come from this one fault: small text that does not
+  fill the balloon, AND the letters inside the bite never being cleaned (the
+  cleaner is confined to the mask), left as faint near-white fragments.
+  `repair_letter_bites` re-floods with the RAW ink as the only wall and adds
+  back only what the mask and the ink ALREADY ENCLOSE (a bite is a pocket; a
+  leak is enclosed by nothing). Bounding it to the letterer's block is NOT
+  enough on its own: the blob cluster reaches past the balloon's own arc, so
+  an escape onto pale sky can land INSIDE the block — the cleaner then reads
+  the fill off the sky, paints it over the artwork and leaves the old
+  lettering standing. An area ratio cannot see it either: such an escape can
+  be under 2% of the mask.
 - The fill is the authority on the row profile in BOTH directions
   (`resolve_rows`): clip where the profile leaked past it, and give the rows
   their width back where the profile sits further inside it than its own
@@ -124,37 +133,34 @@ session needs:
   letter-union repair only reaches rows that hold letter pixels, and the 6x6
   erosion smears a bite three rows past the letter that caused it. Those
   rows are what a line box lands on and `rows_span` takes the NARROWEST row
-  of the band, so two chewed rows cost p88 b06 three size steps.
+  of the band, so two chewed rows can cost several size steps.
 - `clean_caption_box` estimates the fill under a word by INTERPOLATING across
   it from the fill either side, per row. A morphological close is right for
   FINDING the ink (it is only a threshold) and wrong for replacing it: a
   close takes the BRIGHTEST value in its window, and the window has to be as
   wide as a whole word, so on a box whose fill grades along the row it reads
   the bright end as the fill everywhere and repaints the line as a flat,
-  too-bright slab with straight edges ("yellow square very bad, rectangle",
-  p42, 20-45 levels bright). Measure the fill on `~(ink | halo)` — never on
-  pixels merely excluded from the repaint, or the spared frame drags the
-  estimate 100 levels dark beside it.
+  too-bright slab with straight edges (20-45 levels bright). Measure the fill
+  on `~(ink | halo)` — never on pixels merely excluded from the repaint, or
+  the spared frame drags the estimate ~100 levels dark beside it.
 - With `--book` PINNED the sizing pass may cap its search at
   max(book, the original's own size) — every dialogue size is clamped there
   anyway. 7x faster and byte-identical (verified). Unpinned it must still run
   free: the book size IS the percentile of those maxima.
 - The bubble repaint must protect the OUTLINE without stranding lettering —
-  both halves matter and it took two rounds to get right. Masks leak (a tail
-  that leaves the crop window floods the white page; a balloon on pale sky
-  has nothing to stop the fill), so everything dark in the mask cannot just
-  be wiped — that erased the outline and the balloon vanished, leaving the
-  new text on bare art (225 bubbles). But "letters = dark islands ENCLOSED
-  by the fill" is ALSO wrong: a joined-balloon split truncates the mask
-  mid-text and letters straddling that edge are not enclosed, so they
-  survive — 341 stranded letters on 81 pages, which read as "wild letters"
-  and as the new text sitting on top of the old. The rule that satisfies
-  both: wipe every dark pixel the mask covers EXCEPT long thin CURVES
-  (extent >= 0.45 * bbox span and area <= 0.28 * its own bbox = an outline
-  or a panel line; lettering is compact even when several letters merge),
-  plus the enclosed islands. Classify on the WHOLE region — the mask
-  boundary chops the outline into short arcs that stop looking like curves.
-  Never size-cap what counts as lettering.
+  both halves matter. Masks leak (a tail that leaves the crop window floods
+  the white page; a balloon on pale sky has nothing to stop the fill), so
+  everything dark in the mask cannot just be wiped — that erases the outline
+  and the balloon vanishes, leaving the new text on bare art. But "letters =
+  dark islands ENCLOSED by the fill" is ALSO wrong: a joined-balloon split
+  truncates the mask mid-text and letters straddling that edge are not
+  enclosed, so they survive as stray letters under the new text. The rule
+  that satisfies both: wipe every dark pixel the mask covers EXCEPT long
+  thin CURVES (extent >= 0.45 * bbox span and area <= 0.28 * its own bbox =
+  an outline or a panel line; lettering is compact even when several
+  letters merge), plus the enclosed islands. Classify on the WHOLE region —
+  the mask boundary chops the outline into short arcs that stop looking like
+  curves. Never size-cap what counts as lettering.
 - The ink cut-off adapts to each balloon's own fill (`ref - 60`, capped at
   DARK_MAX+40): a tinted caption (yellow, blue) sits near the global
   cut-off, so a fixed threshold split its fill into bands and spared the
@@ -169,98 +175,93 @@ session needs:
   row-width profile for stacked lobes; lobes side by side (a diagonal run)
   have no waist — a row span is a single x-range — so `mask_lobes` falls
   back to distance-transform peaks with nearest-peak assignment. Missing
-  this crammed 3 paragraphs into one lobe at 12px with two lobes empty.
+  this crams every paragraph into one lobe at a tiny size and leaves the
+  other lobes empty.
 - The letterer's block is THE anchor, so clip it (`block_anchor`) to the
   balloon's rows AND its bbox: the blob cluster swallows artwork beside the
-  balloon (fur, a panel line) and slid text clean out of the lobe.
+  balloon (fur, a panel line) and slides text clean out of the lobe.
 - Keep the new lettering clear of the drawn outline (`inset_rows`,
   ~3.5% of the profile's extent) — the row profile runs to the mask edge and
   the mask includes the outline stroke, so type set at the book size lands
   ON the line. Apply it to the FIT ONLY: inset the CLEANING and rim letters
   survive.
 - Where a mask LEAKED past the balloon, clip the fit's row profile (and the
-  last rung's `rows_raw`) to the balloon's own fill — p5's profile was a
-  417px-wide rectangle for a 264px oval, so lines were set where the oval
-  had long since narrowed.
+  last rung's `rows_raw`) to the balloon's own fill — a leaked profile can
+  be a rectangle far wider than the oval, so lines get set where the oval
+  has long since narrowed.
 - Overlap between two balloons is ceded whole to one of them; a balloon must
   never cede pixels inside its OWN text block, or its lettering is left
-  uncleaned AND the fit has no room (p101 stuck at 15px vs 21px). But "its
-  OWN" must exclude whatever the SIBLING's block claims (`own_block_mask`):
-  a block is a blob cluster, and p294 b07's reached over b12's first line —
-  so the guard held b12's "SI DESEAS" inside b07's mask and with it the
-  slice of b12's balloon b07's flood had filled, and b07's own last line was
-  cut away instead. Where two blocks collide neither claim is credible.
+  uncleaned AND the fit has no room. But "its OWN" must exclude whatever the
+  SIBLING's block claims (`own_block_mask`): a block is a blob cluster and
+  can reach over the sibling's first line — the guard then holds that line,
+  and the slice of the sibling's balloon this flood filled, inside this
+  mask, and this balloon's own last line is cut away instead. Where two
+  blocks collide neither claim is credible.
 - Joined lobes are stacked or side by side — EXCEPT when their blocks
   overlap on BOTH axes, which means they are DIAGONAL and no straight cut
   separates them. The row window then runs BACKWARDS (from the upper's block
   bottom UP to the lower's block top) and the cut lands inside the upper's
-  own lettering: p294's fell at y1954, the mask lost that line, the cleaner
-  is confined to the mask so it survived, and the profile kept the part of
-  the sibling's balloon the flood had filled (the last line was set 274px
-  wide in a 220px balloon). `seam_split` assigns each pixel to the lobe
-  whose own LETTERING is nearer — never the block, which is the polluted
-  thing. Only 3 pairs book-wide take it. Clamp the straight cuts out of the
-  upper/left lobe's own block too, but SKIP a clamped cut that would leave a
-  lobe with under a quarter of its mask.
+  own lettering: the mask loses that line, the cleaner (confined to the
+  mask) leaves it standing, and the profile keeps the part of the sibling's
+  balloon the flood filled, so lines are set wider than the balloon.
+  `seam_split` assigns each pixel to the lobe whose own LETTERING is nearer
+  — never the block, which is the polluted thing. Clamp the straight cuts
+  out of the upper/left lobe's own block too, but SKIP a clamped cut that
+  would leave a lobe with under a quarter of its mask.
 - The refine pass (`strict_bubble` per lobe) may miss 15% of the block's
-  rows, but not as a TRUNCATION at an end of it: p149 b08's flood stopped
-  12px above its block's bottom — 89% covered, so accepted — and the mask
-  lost the last line, "SU PODER.", which the reader saw standing under the
-  new text. Give those rows back from the mask being replaced, bounded to
-  the lobe's own block. And drop mask DEBRIS before cropping: ceding a
-  sibling's oval left p294 b07 two slivers of that balloon's rim, 1.4% and
-  0.4% of its mask, which held its bbox 130px taller than its own balloon.
+  rows, but not as a TRUNCATION at an end of it: a flood that stops short
+  of the block's bottom is accepted on coverage, the mask loses the last
+  line, and the old line stands under the new text. Give those rows back
+  from the mask being replaced, bounded to the lobe's own block. And drop
+  mask DEBRIS before cropping: slivers of a ceded sibling's rim, a percent
+  or two of the mask, can hold the bbox far taller than its own balloon.
 - Detection changes are only safe while the bubble COUNT per page holds —
   the transcripts are positional. Re-detect into a scratch compare first and
   REFUSE any page whose count moved. Widening `letter_mask` to accept tinted
-  fill (for gradient caption boxes) creates entries (12->15 on one page), so
-  it cannot be done without re-transcribing those pages.
+  fill (for gradient caption boxes) creates entries, so it cannot be done
+  without re-transcribing those pages.
 - The overflow inpaint's window is the bubble's OWN bbox, never the raw
   `block`: a blob cluster swallows the balloon next door, and the step then
-  erased a neighbour's lettering that nothing types back — p78 and p234
-  shipped with an EMPTY balloon. Measured book-wide, reaching past the bbox
-  bought 3 stray blobs (<=13px out) and cost 45 of a neighbour's letters and
-  line art; all 1704 blobs it legitimately cleans are inside the bbox. No
-  margin helps — the balloons are adjacent.
+  erases a neighbour's lettering that nothing types back — an EMPTY
+  balloon. Measured: reaching past the bbox buys a handful of stray blobs a
+  few px out and costs a neighbour's letters and line art; everything it
+  legitimately cleans is inside the bbox. No margin helps — the balloons
+  are adjacent.
 - A coloured caption box with a gradient fill comes back as TWO stacked
   entries: a `tint` strip plus a `bubble` strip, split where the fill crosses
   LIGHT_MIN, each with a RAGGED mask that follows the fill instead of the
-  box. 28 boxes on 19 pages. Clean it as ONE box (`caption_boxes` ->
-  `clean_caption_box`) INSTEAD of its members — never after them, or the box
-  pass reads their whitened strip as the fill level and paints a white band
-  right across it. The transcripts are already complete (one half per entry),
-  so this needs NO re-transcription. `{"box": [x0,y0,x1,y1]}` in
-  layout_overrides.json covers a box detection half-masked without splitting.
+  box. Clean it as ONE box (`caption_boxes` -> `clean_caption_box`) INSTEAD
+  of its members — never after them, or the box pass reads their whitened
+  strip as the fill level and paints a white band right across it. The
+  transcripts are already complete (one half per entry), so this needs NO
+  re-transcription. `{"box": [x0,y0,x1,y1]}` in layout_overrides.json
+  covers a box detection half-masked without splitting.
 - The two strips of one box must AGREE on their x range (`X_AGREE`, IoU
   0.85), not merely overlap: they are cut from ONE rectangle by a horizontal
   fill threshold, so their extents match to a few px, while an oval of
   similar width sitting a little to one side passes an overlap test easily.
-  p164's 257x86 balloon two panels up joined a caption box and
-  ONE fault produced both halves the user saw — the box grew 233x73 to
-  277x179 so the fit had 265px of writing width in a 230px box (both lines
-  printed past the frame), AND the box now had a member nothing typesets, so
-  the wipe skipped the whole box and its strips were cleaned as separate
-  entries (a flat yellow slab, a white band at the seam, a tab of fill on
-  the artwork). Book-wide the 31 real pairs run 0.893-0.998 and the two
-  false ones sit at 0.716 and 0.769; the 3.0 strip-shape ratio does NOT
-  separate them (p164's false member is 2.99, two real tint halves are 2.25
-  and 2.49).
+  A false member does double damage: the box grows past its frame so the
+  fit gets more writing width than the box has (lines print past the
+  frame), AND the box now has a member nothing typesets, so the wipe skips
+  the whole box and its strips are cleaned as separate entries (a flat
+  slab, a white band at the seam, a tab of fill on the artwork). Real pairs
+  measure ~0.89-1.0, false ones ≤ ~0.77; the strip-shape ratio does NOT
+  separate them.
 - A caption box is ONE BLOCK OF TYPE (`stack_box_lines`). The strips are an
   artefact of the fill crossing LIGHT_MIN and carry no meaning for the
-  layout, but each was centred in its own strip — so the box printed with a
-  blank line at the seam: "too much space between paragraphs, as if it were
-  2 bubbles not one" (p147's bottom-left box, p219). Put every line of the
-  box on one grid centred on the union of its members' blocks. A `sole_box`
+  layout, but centring each in its own strip prints the box with a blank
+  line at the seam, as if it were two balloons. Put every line of the box
+  on one grid centred on the union of its members' blocks. A `sole_box`
   entry already spans the whole box and is left alone.
 - A drawn caption FRAME gets NO overhang (`wrap_at(..., tight=True)` for any
   entry in a box). `wrap_at` lets the first and last line hang 0.16 of a line
   height past their rows, because glyphs fill ~70% of the line box and a
   balloon's arc forgives it; a frame forgives nothing, the fill IS the
-  writing area. p214's recovered box is 47px of interior and two 24px line
-  boxes "fit" it — the type printed across the top and bottom rules. Also:
-  a `box` override's rect is the frame's INNER edge (boxrect.py's
-  convention), never the outer frame. Measured on the outside, that box read
-  11px taller than it is and the size came out a step and a half too big.
+  writing area — with overhang a short box "fits" two line boxes and the
+  type prints across its top and bottom rules. Also: a `box` override's
+  rect is the frame's INNER edge (boxrect.py's convention), never the outer
+  frame — measured on the outside, the box reads taller than it is and the
+  size comes out too big.
 - `clean_caption_box` estimates the fill LOCALLY (horizontal grayscale close,
   then paint from that same estimate per channel). A per-row level reads a
   highlight as the fill and everything yellow as ink, and paints the row
@@ -269,71 +270,68 @@ session needs:
 - `bubble_interior` walls the flood on a COLOUR change as well as on dark
   strokes (COLOUR_WALL). Where a balloon sits on pale sky and its outline has
   a gap, the fill escapes and the "interior" becomes balloon + page — which
-  silently defeats clipping the fit's row profile to that interior (p65 b07
-  kept 283 of 311 rows and set two lines above the balloon's top arc).
+  silently defeats clipping the fit's row profile to that interior (lines
+  get set above the balloon's top arc).
 - Row spans follow ONE connected run (`widest_run`), never first-to-last.
   Low in a balloon the fill splits into the body and the mouth of the tail;
-  spanning that gap let the wrap set its last lines out into the tail, hard
-  against the outline (p127's "text outside the bubble").
+  spanning that gap lets the wrap set its last lines out into the tail, hard
+  against the outline.
 - `parse_runs` resolves style PER CHARACTER, then splits on whitespace. A
-  regex alternation cannot: `\S+` swallows `¡--*WORD*` whole and the book
-  printed literal asterisks (5 bubbles).
+  regex alternation cannot: `\S+` swallows `¡--*WORD*` whole and prints
+  literal asterisks. `\*` is a literal asterisk (a footnote mark) and never
+  toggles emphasis; a lone unmatched `*` also stays literal, but only when
+  no other `*` follows it.
 - The ink cut-off leaves the lettering's PALE strokes (150-220 on a 250 fill)
-  behind as faint letter-shaped specks — 1428 bubbles on 263 pages, visible
-  at 1:1 300dpi and invisible to letter_mask. A softer cut-off fixes it but
-  ONLY inside the letterer's block AND inside the balloon's own fill
-  (`solid`): bounded to the block alone it caught artwork through a leaked
-  mask and painted white rectangles (17 artifact blobs vs 2).
+  behind as faint letter-shaped specks — visible at 1:1 300dpi and invisible
+  to letter_mask. A softer cut-off fixes it but ONLY inside the letterer's
+  block AND inside the balloon's own fill (`solid`): bounded to the block
+  alone it catches artwork through a leaked mask and paints white
+  rectangles.
 - Verify EVERY batch, and NEVER substitute a proxy metric for these — a
-  layout-geometry check passed while 341 stranded letters shipped:
+  layout-geometry check can pass while stranded letters ship:
   (1) leftover scan = re-run detection's own `letter_mask` on the CLEANED
   working pages over the mask UNION the block UNION every laid-out line's
   box; any letter blob where the transcript has text = failed cleaning
   (healthy baseline: <20 book-wide). Intersecting with the MASK ALONE hides
   the worst failure there is — lettering the mask never covered is exactly
-  what puts new text on top of old — and reported 14 blobs "healthy" while
-  p170 and p147 carried whole lines of old text under the new (widened: 51).
-  It is still blind to text on a COLOURED fill and to faint residue; (2) qa_scan
-  pixel-diff vs relettering/<comic>/pristine/ — this is the gate that catches
-  a cleaning change repainting ART (it found 17 white rectangles against a
-  shipped baseline of 2); `protrude.py` cannot stand in for it, since it
-  measures against the MASK and a leaked mask is the very thing that puts
-  text outside the balloon (it flagged none of p45/p65/p127) (text-shaped footprints only;
+  what puts new text on top of old — and reads "healthy" while whole lines
+  of old text stand under the new. It is still blind to text on a COLOURED
+  fill and to faint residue; (2) qa_scan pixel-diff vs
+  relettering/<comic>/pristine/ — this is the gate that catches a cleaning
+  change repainting ART (white rectangles); `protrude.py` cannot stand in
+  for it, since it measures against the MASK and a leaked mask is the very
+  thing that puts text outside the balloon (text-shaped footprints only;
   also eyeball blobs taller than a text line — wedges slip the 4000/35
   gate, and an erased balloon outline is LOW-area but wide, so gate on
-  min-dim ≥45 / area ≥400 to catch it); (3) EXACT 1:1 300dpi render overlays vs the source — fraction
-  crops hide 10-20px placement errors the reviewer sees.
+  min-dim ≥45 / area ≥400 to catch it); (3) EXACT 1:1 300dpi render
+  overlays vs the source — fraction crops hide 10-20px placement errors the
+  reviewer sees.
 - A SUBSET promote ships the layout fix but NOT the cleaning fix. `promote.py`
   only ever looks at the pages the subset re-fit staged, so a cleaning change
-  never reaches the rest: after round 4, 209 pages still carried round-3
-  pixels, and p168 shipped with its whole first paragraph legible as a grey
-  ghost under the new text. Cleaning changes need a full re-clean
-  (`reclean_all.py`, 1.4 min) — measured with `faint_scan.py`, which the
-  leftover scan cannot see (8466 specks shipped vs 5814 re-cleaned).
+  never reaches the rest, which keep the old cleaning's pixels (a whole
+  paragraph can stay legible as a grey ghost under the new text). Cleaning
+  changes need a full re-clean (`reclean_all.py`, ~1.4 min) — measured with
+  `faint_scan.py`, which the leftover scan cannot see.
 - THE PER-BUBBLE PREP HAS ONE HOME: `prepare_bubble` (with
   `page_caption_boxes` / `boxes_to_wipe` / `is_strip`). The fit's `main()`
-  and `reclean_all.py` both call it. reclean_all used to hand-mirror that
-  preparation — four "mirror main()" blocks by the time it was extracted —
-  so every new cleaning behaviour (the `lobes` override, sole_box,
-  unfound_balloon) had to be copied there by hand or the book-wide
-  verification silently stopped reproducing the pipeline. Add cleaning
-  behaviour THERE, never in a caller.
+  and `reclean_all.py` both call it. A hand-mirrored copy of that
+  preparation in a caller means every new cleaning behaviour has to be
+  copied there by hand, or the book-wide verification silently stops
+  reproducing the pipeline. Add cleaning behaviour THERE, never in a caller.
 - MEASURE THE PDF, NOT THE PLAN. `cap_height` used to return PIL's
   `getbbox("H")` — the layout box from the ascender origin, rounded out to
   whole px — while `old_cap_h` is measured off the ORIGINAL'S PIXELS. At 23px
-  it claimed 22 where GIMP renders 19 (printed/predicted = 0.864 book-wide),
-  so `new_cap_h >= old_cap_h` COULD NOT FAIL: 0 of 56 sampled bubbles looked
-  small while 5 printed smaller than the original, and four rounds of
-  "verified fixed" reached a reader who could still see it. cap_height now
-  measures the cap glyph's own ink height from the font at run time
-  (fontTools, x size / unitsPerEm). Any metric computed from a MODEL has to
-  be checked against the RENDERED artefact once, or it certifies the model.
-- Our font is ~1.5x WIDER per unit of cap height than the original edition's
-  (p88 b06: the original's "PUEDO..." is 57px at cap 17; ours needs 90px in a
-  90px balloon). So a tight balloon cannot hold the original's cap height at
-  natural width, and every "text small, not occupying the whole bubble" the
-  user reported was width-bound within a pixel or two. Two levers, both the
-  USER'S POLICY CALLS (Sep 16 2026, both approved):
+  it claimed 22 where GIMP renders 19, so `new_cap_h >= old_cap_h` COULD NOT
+  FAIL and text printed smaller than the original passed as "verified".
+  cap_height now measures the cap glyph's own ink height from the font at
+  run time (fontTools, x size / unitsPerEm). Any metric computed from a
+  MODEL has to be checked against the RENDERED artefact once, or it
+  certifies the model.
+- The configured font can be much WIDER per unit of cap height than the
+  original edition's (~1.5x for the default font), so a tight balloon cannot
+  hold the original's cap height at natural width, and "text small, not
+  filling the bubble" is usually width-bound within a pixel or two. Two
+  levers, both deliberate POLICY CALLS by the user:
   (1) joined lobes size INDEPENDENTLY (`lobe_size_caps`) — each fills its own
   balloon, even though the original letterer used one size per joined pair;
   (2) TRACKING up to 5% of the em (`track_steps`), tried loosest-first at
@@ -350,132 +348,118 @@ session needs:
   entry's). Pass it the KIND CEILING, never the bubble's `max_size` — that
   IS the tightest lobe's, so there is no room to grow.
 - `open`/`margin` is also detection's FALLBACK when its walled flood fails
-  on a balloon that IS drawn, and then nothing bounds the new type: p242's
-  shout was set 141px wide in a 132px oval and printed across the
-  outline on both sides. Its block could not catch it (the blob cluster had
-  swallowed both arcs, so the block was 148px) and neither could the size
-  ceiling (those arcs carried the measured cap height from ~25px to 36px,
-  which is 9 size steps). `unfound_balloon` floods out from the block, and
-  the proof that what comes back IS a balloon is that it is NARROWER than
-  the block — the block runs the width of the lettering, so a real interior
-  contains it, and an escaped flood comes back wider (p222 b04's ran down
-  the tail: 194px for a 132px block, correctly refused). Do NOT try to get
-  this from the ink components instead: dropping the ones that cross the
-  block border by border also drops a letter WELDED to the outline (p182's
-  "S", p222's "!"), and keeping them lets artwork in.
+  on a balloon that IS drawn, and then nothing bounds the new type: it can
+  be set wider than the oval and print across the outline on both sides.
+  Its block cannot catch it (the blob cluster swallows both arcs, so the
+  block is wider than the interior) and neither can the size ceiling (those
+  arcs inflate the measured cap height by many size steps).
+  `unfound_balloon` floods out from the block, and the proof that what
+  comes back IS a balloon is that it is NARROWER than the block — the block
+  runs the width of the lettering, so a real interior contains it, and an
+  escaped flood (e.g. down the tail) comes back wider and is refused. Do
+  NOT try to get this from the ink components instead: dropping the ones
+  that cross the block border also drops a letter WELDED to the outline,
+  and keeping them lets artwork in.
 - `{"lobes": [[x0,y0,x1,y1], ...]}` in layout_overrides.json is the escape
-  hatch for a mask that leaked past all recognition: p276 b04 is TWO
-  balloons on pale sky returned as ONE 1269x528 entry whose mask covers 79%
-  of the panel — mask_lobes sees one blob, the fit places nothing, cleaning
-  it would repaint sky, and splitting the entry in detection would renumber
-  the page and invalidate its positional transcripts. One rectangle per
-  balloon, IN PARAGRAPH ORDER, each roughly centred on its balloon; each is
-  re-flooded inside itself (`lobes_from_rects`) and the entry then bypasses
-  every block-driven repair, because its block spans both balloons. CLEAN IT
-  PER LOBE — `lobes_from_rects` hands back one job per balloon, each with the
+  hatch for a mask that leaked past all recognition — e.g. two balloons on
+  pale sky returned as ONE entry whose mask covers most of the panel:
+  mask_lobes sees one blob, the fit places nothing, cleaning it would
+  repaint sky, and splitting the entry in detection would renumber the page
+  and invalidate its positional transcripts. One rectangle per balloon, IN
+  PARAGRAPH ORDER, each roughly centred on its balloon; each is re-flooded
+  inside itself (`lobes_from_rects`) and the entry then bypasses every
+  block-driven repair, because its block spans both balloons. CLEAN IT PER
+  LOBE — `lobes_from_rects` hands back one job per balloon, each with the
   original ink inside that interior as its block. Cleaned as ONE entry the
-  cleaner reads the entry's own block (836x407 over a panel of sky) and the
-  strict ink term repainted the green sphere and the darts behind p276's
-  left balloon; per lobe it changes 0 pixels outside the rectangles. EVERY
-  gate that reads the mask PNG must apply the override too (`gate_mask` in
+  cleaner reads the entry's own block (spanning the sky between the
+  balloons) and the strict ink term repaints the artwork behind them; per
+  lobe it changes nothing outside the rectangles. EVERY gate that reads the
+  mask PNG must apply the override too (`gate_mask` in
   leftover/welded/faint_scan; outside.py floods its own fill, so it takes
   the per-lobe interiors instead — and in the PAGE frame, since these lobes
-  reach far past the entry's bbox: p231 b01's is a 72px slice across two
-  balloons 292px tall). Otherwise the gate measures a region nothing ever
-  cleaned: letter_mask found 16 letter-shaped pieces of ARTWORK in p276
-  b04's leaked mask, and outside.py called both `lobes` entries the two
-  worst in the book while their text is demonstrably inside their balloons.
+  can reach far past the entry's bbox). Otherwise the gate measures a
+  region nothing ever cleaned: letter_mask finds letter-shaped pieces of
+  ARTWORK in a leaked mask, and outside.py ranks correctly-placed `lobes`
+  entries as the worst in the book.
 - A CAPTION IS CENTRED ON THE LETTERER'S BLOCK, like a balloon. `tint`/
   `dark`/`open` used the width-weighted centroid of their own row profile,
   and `caption_boxes` finds a box by its FILL — so on a yellow->white graded
   box the rectangle is only the coloured part and its centre sits ABOVE where
-  the letterer set the type. p42: box centre 175.5 vs the letterer's 181.5,
-  printed ink on rows 167-183 against the original's 174-189, and the 7px of
-  flat colour left under it read as "yellow square very bad, rectangle" for
-  three rounds — the FILL was reconstructed to within 7 levels, the TYPE was
-  in the wrong place. The non-bubble `wrap_at` call must also pass
+  the letterer set the type: the fill is reconstructed perfectly, the TYPE
+  is set high, and the strip of flat colour left under it reads as a
+  coloured rectangle. The non-bubble `wrap_at` call must also pass
   `hold_cy=True`: without it wrap_at re-balances and re-centres the block
   geometrically in the rows, throwing away the anchor you just measured.
-  Every caption box in the book was set high (30 of 39 entries moved down
-  4-11px).
 - A caption box's drawn FRAME is found on `region.max(axis=2)`, never on the
-  min channel: a yellow fill has a low BLUE channel, so min() called 93.9% of
-  p42's box "dark" and no frame could be picked out of it. `frame_bounds`
-  confines the repaint inside the frame — without it the repaint wiped the
-  frame and left a tab of fill colour on the artwork beside it. Do not pad
+  min channel: a yellow fill has a low BLUE channel, so min() calls nearly
+  the whole box "dark" and no frame can be picked out of it. `frame_bounds`
+  confines the repaint inside the frame — without it the repaint wipes the
+  frame and leaves a tab of fill colour on the artwork beside it. Do not pad
   the box outward to catch ink just outside it: that lets artwork into the
   region, the frame detection loses edges and the repaint spills further.
 - A CAPTION BOX IS FOUND FROM ITS FRAME (`frame_box` +
   `auto_caption_boxes`), not from detection's strips. A gradient box
   defeats detection in more shapes than the tint+bubble pair: one strip that
-  misses its pale lines, three slivers side by side with the top lines in
-  none (2-066), one line cut in two. Flood the fill from the lettering with
-  only TRUE BLACK (max channel <= FRAME_MAX) as the wall — yellow and white
-  are one region — and inside a drawn frame it comes back a rectangle
-  (>=0.93; ovals 0.55-0.78), with nothing taller than a line of type inside
-  and a frame on all four sides. It then becomes exactly a `box` override:
-  the first member with text carries the whole box's text, the rest set
+  misses its pale lines, several slivers side by side with the top lines in
+  none, one line cut in two. Flood the fill from the lettering with only
+  TRUE BLACK (max channel <= FRAME_MAX) as the wall — yellow and white are
+  one region — and inside a drawn frame it comes back a rectangle (>=0.93;
+  ovals 0.55-0.78), with nothing taller than a line of type inside and a
+  frame on all four sides. It then becomes exactly a `box` override: the
+  first member with text carries the whole box's text, the rest set
   nothing, the box is wiped whole, and its cap height is read off every
-  letter in the frame (off a strip with the tint threshold it read 19px for
-  letters 21-25px tall). It fires ONLY where detection demonstrably lost
-  part of the box (>=4 letters outside every member mask and every strip
-  pair, or a line cut side by side, or several members no pair covers):
-  across both shipped books it finds nothing a hand `box` override does not
-  already cover — and those overrides match its frames to 2px. A hand
+  letter in the frame (off a strip with the tint threshold it reads
+  several px short). It fires ONLY where detection demonstrably lost part
+  of the box (>=4 letters outside every member mask and every strip pair,
+  or a line cut side by side, or several members no pair covers); where
+  hand `box` overrides exist they match its frames to ~2px. A hand
   override always wins.
 - BALLOONS FROM THE LETTERING (`letter_lobes`). Two balloons side by side in
-  ONE entry: 4 of 11 in book 3 did not split from the mask at all (the
-  distance-transform peaks miss a balloon much smaller than its
-  neighbour), 4 came back SWAPPED (lobes sorted on their top row, and the
-  right balloon's top sat a few px higher), and 2-030-2's mask had leaked
-  across the panel so the cleaning painted out both outlines and the
-  panel's colour. The letterer says which is which: split his letters at
-  the widest MST gaps into one group per paragraph (never cutting off a lone
+  ONE entry often fail from the mask: the distance-transform peaks miss a
+  balloon much smaller than its neighbour, lobes sorted on their top row
+  come back SWAPPED when the right balloon's top sits a few px higher, and a
+  mask leaked across the panel gets both outlines and the panel's colour
+  painted out. The letterer says which is which: split his letters at the
+  widest MST gaps into one group per paragraph (never cutting off a lone
   speck), order them with `reading_order` (left before right when they share
   most of their height), flood each balloon out from its own letters, and
   where floods meet give each pixel to the lettering nearest it INSIDE the
-  fill (`geodesic_owner` — straight-line distance gave a big balloon's
+  fill (`geodesic_owner` — straight-line distance gives a big balloon's
   corner to the small one beside it; a watershed on the distance-to-edge
-  handed the strip under one text to the other balloon). Neighbouring
-  entries' letters compete too (4-024 b05: a rectangle over half its text,
-  the joined neighbour had the rest). Letters are only ink pieces WHOLLY
-  inside the block — the block rectangle chops the outline into arcs that
-  pass for letters, and one got repainted as a white tab. Each lobe owns its
-  letters (welded to the outline, they fall outside the flood and survived
-  as fragments). Used only where the old path fails: paragraphs side by
-  side, a COMPOUND entry's mask well past (>1.4x) its balloons, or a mask
-  well under (<60%) the balloon that ALSO lost the entry's own letters. A
-  single balloon's mask commonly runs 1.6-2.9x its walled interior and the
-  ordinary path copes — re-finding those moved 14 approved book-2 balloons
-  for no gain, two of them worse (crowding a joined balloon).
-- UPSCALE "DONE" IS NOT ONLY A SIZE. The resume check used to compare the
-  output's size alone, and erasing a folio changes the pixels without
-  changing the size wherever the number did not stretch the crop box — 15
-  sources of book 3 kept their pre-erasure outputs, so the fit cleaned
-  pages that still carried their printed numbers (and detection had made
+  hands the strip under one text to the other balloon). Neighbouring
+  entries' letters compete too (a joined neighbour can hold half of this
+  entry's text). Letters are only ink pieces WHOLLY inside the block — the
+  block rectangle chops the outline into arcs that pass for letters, which
+  then get repainted as white tabs. Each lobe owns its letters (welded to
+  the outline, they fall outside the flood and survive as fragments). Used
+  only where the old path fails: paragraphs side by side, a COMPOUND
+  entry's mask well past (>1.4x) its balloons, or a mask well under (<60%)
+  the balloon that ALSO lost the entry's own letters. A single balloon's
+  mask commonly runs 1.6-2.9x its walled interior and the ordinary path
+  copes — re-finding those moves approved balloons for no gain, some for
+  the worse (crowding a joined balloon).
+- UPSCALE "DONE" IS NOT ONLY A SIZE. Erasing a folio changes the pixels
+  without changing the size wherever the number did not stretch the crop
+  box, so a size-only resume check keeps pre-erasure outputs — the fit then
+  cleans pages that still carry their printed numbers (and detection makes
   an empty bubble of each). An output older than folios.json, on a page the
   plan erases something from, is stale. The pristine/ copy of such a page is
   stale too: refresh it (`cp -p`) and re-detect the page.
 - A FOLIO PAGE'S CROP must lose the folio's band: once the number is
-  erased, scan dust left there (a 4px speck on the last row, a stripe at
-  x=0) still held crop_to_content open, so 10 pages kept 50-90px of empty
-  paper and printed their art ~4% smaller than their neighbours.
-  `trim_folio_band` (folio pages only, bottom band + a narrow edge stripe
-  on the sides) fixes exactly those 10 in book 3 and nothing in book 2. A
-  general dust rule in crop_to_content was measured and REFUSED: it moved
-  31 book-3 crops, 53 in approved book 2, 100+ in the UK set.
-  Full-bleed pages (art to the side edges) are width-bound already and
-  cannot print bigger.
-- A SCAN-EDGE STRIPE holds the crop open on BOTH axes: book 3 p205 had 8px
-  of grey gutter shadow at x=0 down its top 555 rows, which kept the left
-  margin AND the top one (art 4% small). `drop_edge_stripes` (in
-  crop_to_content, every page) clears a content run <=1% wide that touches
-  the scan edge a gap away from the art, then re-measures. Narrower than the
-  refused dust rule: 9 pages in approved book 2, 4/3 in comics 3/4, 75 in
-  UK, and 22 in book 3 — 14 by the stripe, 8 by `trim_folio_band` no
-  longer returning early when the bottom is already tight (it skipped its
-  side check there: a 1px speck in from the edge held 8 folio pages ~3%
-  small). Every one grew, to its neighbours' scale; boxes eyeballed.
+  erased, scan dust left there (a speck on the last row, a stripe at x=0)
+  still holds crop_to_content open, so the page keeps a band of empty paper
+  and prints its art a few % smaller than its neighbours. `trim_folio_band`
+  (folio pages only, bottom band + a narrow edge stripe on the sides) fixes
+  that. A general dust rule in crop_to_content was measured and REFUSED: it
+  moves many correct crops, including in approved books. Full-bleed pages
+  (art to the side edges) are width-bound already and cannot print bigger.
+- A SCAN-EDGE STRIPE holds the crop open on BOTH axes: a thin gutter shadow
+  at x=0 down part of the page keeps the left margin AND the top one.
+  `drop_edge_stripes` (in crop_to_content, every page) clears a content run
+  <=1% wide that touches the scan edge a gap away from the art, then
+  re-measures. Narrower than the refused dust rule. `trim_folio_band` must
+  not return early when the bottom is already tight — it would skip its
+  side check, and a 1px speck in from the edge holds the page small.
 - A fitted book's upscaled/ pages ARE the cleaned working pages, so
   `cmd_upscale` KEEPS (prints `KEPT:`) any existing page whose expected
   upscale changed once layout.json exists — it used to re-upscale it in
@@ -484,154 +468,153 @@ session needs:
   the source + re-letter, by hand.
 - REBUILDING AN APPROVED PAGE IS NOT A RE-FIT. A subset promote keeps
   entries verbatim, so an approved book's shipped entries can predate even
-  the commit it was approved on: re-fitting 9 book-2 pages on IDENTICAL
-  masks set 5 balloons 1px smaller with worse breaks (a 4-line balloon as a
-  6-line column) — with today's code AND with the approval commit's. Per
-  entry: take the new fit where it is LARGER or identical, otherwise carry
-  the shipped entry through the page-geometry map (old page -> source ->
-  new page: cx and each line box's centre; font, breaks, width unchanged).
-  The balloon only grew, so the shipped lines still fit.
+  the commit it was approved on: re-fitting on IDENTICAL masks can set
+  balloons smaller with worse breaks (a 4-line balloon as a 6-line column)
+  — with today's code AND with the approval commit's. Per entry: take the
+  new fit where it is LARGER or identical, otherwise carry the shipped entry
+  through the page-geometry map (old page -> source -> new page: cx and each
+  line box's centre; font, breaks, width unchanged). The balloon only grew,
+  so the shipped lines still fit.
 - Re-upscaling a relettered page changes its scale AND crop origin, so the
   positional transcripts must be remapped through the SOURCE: old page ->
   source px (old crop box, old scale) -> new page. Matching on raw or
   merely scaled block centres mis-pairs a whole page.
 - A joined pair's straight cut is wrong whenever the two blocks OVERLAP
   on the axis it cuts across (the window between them runs backwards), not
-  only when they overlap on both: 3-047 b03 lost its lines' first letters
-  to its neighbour. Both go to `seam_split`. 8 book-3 pairs take the path;
-  only that one had lost letters, so only that page was re-detected.
+  only when they overlap on both: the lines' first letters go to the
+  neighbour. Both go to `seam_split`.
 - `sibling_letter_box`: the FIT never writes over a sibling's lettering
-  that a joined balloon's mask covers (2-064 b10 printed its first line on
-  b07's last). The sibling's LETTERS inside the mask, not its block.
+  that a joined balloon's mask covers (else a first line prints on the
+  sibling's last). The sibling's LETTERS inside the mask, not its block.
 - A GRADED caption box can have too few letters for EITHER letter pass:
   on its tinted part letter_mask sees letter + fill as one dark blob, on its
   white part the tint ring test fails, and a two-word time stamp has 7
-  letters against MIN_LETTERS 8 anyway. Detection's graded-box pass takes letters on
-  either ground (BOX_MIN_LETTERS 5) and requires a drawn FRAME on all four
-  sides as the evidence; it only ADDS boxes that overlap no existing entry,
-  so no transcript key moves except by the inserted entry.
+  letters against MIN_LETTERS 8 anyway. Detection's graded-box pass takes
+  letters on either ground (BOX_MIN_LETTERS 5) and requires a drawn FRAME on
+  all four sides as the evidence; it only ADDS boxes that overlap no
+  existing entry, so no transcript key moves except by the inserted entry.
 - A FRAME DETECTION ONLY PART-HOLDS is a box too: when the entries cover
   under FRAME_HELD (0.85) of the frame's rows, `auto_caption_boxes` makes
-  the frame the box. Measured on book 3: every box held whole covers
-  >= 0.90, every reported one 0.67-0.82. Held part-way, the fit got a
-  fraction of the box (text small) and the cleaner, confined to the strip,
-  read white off the pale rows and painted a band across it.
-- A SCANNED FRAME IS NOT A RULER: `frame_box` lost 6 book-4 boxes to two
-  drawing faults and every one shipped as a half-wiped box (white band,
-  old letters standing, the last line set small and out of the frame).
-  (1) TILT: a hand-drawn edge drifts 4-6px across the box, and the four-
-  sides test looked for it in a straight band outside the fill's BOUNDING
-  box, so the low end of the edge read as unframed (41%) — `frame_sides`
-  measures from each column's/row's OWN edge of the fill. (2) HAIRLINE:
-  4 columns of a bottom edge scanned 91-93 on the 90 cut-off and the flood
-  ran out into the pale art — `frame_wall` takes pixels up to FRAME_SOFT
-  only where they TOUCH true black. Measured on all four books: 6 new
-  boxes in book 4, 1 in book 3 (already shipping fine), 0 in books 1-2;
-  everything else moves its inner edge by 1px. `qa-tools/boxleft.py` is
-  the gate (shipped 5 -> 0); qa_scan flagged only some of these and
-  missed 10-076 entirely.
+  the frame the box. Boxes held whole cover >= 0.90, part-held ones
+  0.67-0.82. Held part-way, the fit gets a fraction of the box (text small)
+  and the cleaner, confined to the strip, reads white off the pale rows and
+  paints a band across it.
+- A SCANNED FRAME IS NOT A RULER: two drawing faults make `frame_box` miss a
+  box, which then ships half-wiped (white band, old letters standing, the
+  last line set small and out of the frame). (1) TILT: a hand-drawn edge
+  drifts 4-6px across the box, and a four-sides test looking in a straight
+  band outside the fill's BOUNDING box reads the low end of the edge as
+  unframed — `frame_sides` measures from each column's/row's OWN edge of
+  the fill. (2) HAIRLINE: a few columns of an edge scan just above the
+  FRAME_MAX cut-off and the flood runs out into the pale art — `frame_wall`
+  takes pixels up to FRAME_SOFT only where they TOUCH true black.
+  `qa-tools/boxleft.py` is the gate; qa_scan catches only some of these.
 - A DASHED OUTLINE (a whisper) is an outline, not lettering
-  (`dashed_rings` in detection). On near-white art (skin 20 levels from
+  (`dashed_rings` in detection). On near-white art (skin ~20 levels from
   the fill) the dashes are the ONLY wall, and the gaps between them run
-  from 7px on an arc to >21px at a corner where a dash fuses with the art,
-  so no closing kernel seals them (tried 7-21px: 10-055 still flooded the
-  whole arm and the cleaner wiped half the outline). The ring is found as
+  from ~7px on an arc to >21px at a corner where a dash fuses with the art,
+  so no closing kernel seals them (7-21px all tried: the flood still takes
+  the art and the cleaner wipes half the outline). The ring is found as
   >= 8 plain strokes (most of a letter long, so accents stay letters)
   chained at <= 1.4 letter heights, outside every PARAGRAPH's hull (one
   hull over all the text swallows a figure-8's waist), round >= 8 of 12
   sides, pointing along the chain and every which way (speed lines and
-  hologram scan lines chain round text too, but are parallel — they were
-  the two false rings in books 2-3). Its dashes leave the letter mask and
-  the gaps are drawn shut on a working copy of the page (neighbours, next
-  round the ring, and each dash end to the nearest ink), never across the
-  lettering. The entry is marked `"dashed"`, and the fit then skips the
-  bite repair (it re-flooded to the raw ink, i.e. back over the dashes),
-  protects every dark piece crossing the sealed mask's edge, and skips the
-  overflow inpaint (all that is out there is the outline). No ring = the
-  page detects exactly as before: across all four books it fires on
-  10-055 only.
+  hologram scan lines chain round text too, but are parallel). Its dashes
+  leave the letter mask and the gaps are drawn shut on a working copy of
+  the page (neighbours, next round the ring, and each dash end to the
+  nearest ink), never across the lettering. The entry is marked `"dashed"`,
+  and the fit then skips the bite repair (it re-floods to the raw ink, i.e.
+  back over the dashes), protects every dark piece crossing the sealed
+  mask's edge, and skips the overflow inpaint (all that is out there is the
+  outline). No ring = the page detects exactly as before; it is rare.
 - `clean_caption_box` finds ink on the MAX channel as well as the min: a
   saturated yellow's blue channel sits by the ink (89 vs a letter's 65), so
-  the min-channel test missed line ends there, and it also turns up a long
+  the min-channel test misses line ends there, and it also turns up a long
   band of FILL that a touching letter fused with and was spared as a
   "curve". Curves are classified per test, and a min-only band never spares
   what the max channel calls lettering.
 - A balloon whose fill grades ALONG the row (announcer bursts: white glow,
-  blue rim) cannot be repainted with one row median — every old line came
+  blue rim) cannot be repainted with one row median — every old line comes
   back as a too-white band and the letters at the blue ends as white
   ghosts. `fill_trend` estimates the fill in 2-D from the fill around the
   lettering, ONLY when the fill strays >= FILL_TREND_MIN from its own row
   median (white and hologram-striped balloons stay on the row median), and
   `fill_wall` widens the colour wall by the ground the letters themselves
-  stand on (the blue rim was 56 hue levels off the white glow, one over the
-  wall). A balloon leaked onto sky keeps the plain wall: its letters stand
-  on white.
+  stand on (a blue rim can sit just over the wall from the white glow). A
+  balloon leaked onto sky keeps the plain wall: its letters stand on white.
 - `repair_letter_bites`' "sealed" test reads the window edge as outside, and
   the rim channel between the eroded mask and the outline runs down a TAIL
-  and out of the window: every rim pocket then counted as a leak (2-053's
-  line end, welded to the arc, survived). Only a narrow opening on the window
-  edge (TAIL_APERTURE) is closed. Do NOT close narrow passages everywhere —
-  tried: 101 masks moved in book 3, and in book 2 the p104/p31/p294 leaks
-  this guard exists for came straight back (they escape through a narrow
-  outline gap, then open out).
-- THE JOINED-PAIR CUTS (book 4 round 2). Four faults, each of which left a
-  lobe's first or last line outside every mask (never cleaned, the new text
-  printed over it): (1) `cut_mask` must subtract the origin ON THE CUT'S
-  AXIS — the old `_cut` subtracted bbox[axis] (x for a row cut), so every
-  merge-stage straight cut was off by the mask's x−y offset (10-048: cut
-  meant for y=541 landed at 600); (2) a notch whose narrowest row is the
+  and out of the window: every rim pocket then counts as a leak (a line end
+  welded to the arc survives). Only a narrow opening on the window edge
+  (TAIL_APERTURE) is closed. Do NOT close narrow passages everywhere —
+  tried: it moves many correct masks, and the leaks this guard exists for
+  come straight back (they escape through a narrow outline gap, then open
+  out).
+- THE JOINED-PAIR CUTS. Four faults, each of which leaves a lobe's first or
+  last line outside every mask (never cleaned, the new text printed over
+  it): (1) `cut_mask` must subtract the origin ON THE CUT'S AXIS —
+  subtracting bbox[axis] (x for a row cut) puts every merge-stage straight
+  cut off by the mask's x−y offset; (2) a notch whose narrowest row is the
   END of the search window is no waist (offset pair) — `notch_cut` returns
   None and the pair takes `seam_split`; a real waist is kept between the
   blocks; (3) in a stack of 3+ joined lobes every first mask is the union of
   all, so the merge host must be the NEAREST lobe above, and every merge
-  pair (not only two-member groups) gets the overlap resolution (12-094);
-  (4) `follow_lobe(text_drift=True)` (main walk ONLY) judges drift against
-  the block centre too — a burst's spike at the seed row stopped the walk
-  inside the first line (12-082). Enabling it in the short-utterance /
-  joined-lobe walks CREATED entries on 7 pages (count change) — refused.
-  Dry-run the whole book after any detection change (count must hold; diff
-  letter coverage per entry) and re-detect only pages that GAIN coverage.
+  pair (not only two-member groups) gets the overlap resolution; (4)
+  `follow_lobe(text_drift=True)` (main walk ONLY) judges drift against the
+  block centre too — a burst's spike at the seed row stops the walk inside
+  the first line. Enabling it in the short-utterance / joined-lobe walks
+  CREATES entries (count change) — refused. Dry-run the whole book after
+  any detection change (count must hold; diff letter coverage per entry)
+  and re-detect only pages that GAIN coverage.
+- A short balloon's host can already be FOLDED by the main pass (its mask
+  the re-cropped union of two balloons), so its frame is not the light
+  component's frame the walk ran in: put both masks on one `common_frame`
+  before combining them, or detection crashes on the shape mismatch.
 - `letter_lobes`: a rival entry's letters never re-seed letters this entry
   already owns — a phantom entry ("" transcript) whose block is one of this
-  entry's paragraphs emptied that lobe and the 3-balloon compound was never
-  re-found (10-041). A recognised strip pair also shares ONE cx (union of
-  its blocks), not just one line grid.
+  entry's paragraphs empties that lobe and the compound is never re-found.
+  A recognised strip pair also shares ONE cx (union of its blocks), not
+  just one line grid.
 - An ELLIPSIS splits a short balloon between detection's two passes: the
-  dots are below the letter-blob floor, so "PU... PUES, YO..." is 2 + 7
-  letters to `paragraph_blocks` (each < MIN_LETTERS) and 9 to the
-  short-utterance pass's wider join, which only took clusters UNDER
-  MIN_LETTERS. It now takes MIN_LETTERS or more too, unless the cluster
-  overlaps a paragraph block (that one was refused on its own merits).
-  Book 5: 3 new entries (2 missed balloons + 1 SFX), every other entry
-  identical. Re-detecting would add 3 missed balloons in book 4 (10-077,
-  11-052, 11-088) and split a caption line in book 3 (4-016): do NOT
-  re-detect 4-016.
+  dots are below the letter-blob floor, so two short words either side of
+  "..." are two clusters, each < MIN_LETTERS, to `paragraph_blocks`, and
+  one cluster to the short-utterance pass's wider join, which only took
+  clusters UNDER MIN_LETTERS. It now takes MIN_LETTERS or more too, unless
+  the cluster overlaps a paragraph block (that one was refused on its own
+  merits). This ADDS entries on a re-detect, so an already-transcribed book
+  must not be re-detected wholesale for it (it can also split a caption
+  line) — dry-run and take only the pages that gain a missed balloon.
 - A token with no letter in it ("...", "¡...", "--") is a word of its own
-  to the wrap, and the balance pass broke after it: 12 balloons in book 5
-  printed a lone "..." over their first line. `glue_bare_punct` (end of
-  `parse_runs`) glues it to the next word (the last one to the word
-  before), and `split_word` never breaks at or beside the glue.
+  to the wrap, and the balance pass breaks after it, printing a lone "..."
+  over the first line. `glue_bare_punct` (end of `parse_runs`) glues it to
+  the next word (the last one to the word before), and `split_word` never
+  breaks at or beside the glue.
 - `notch_cut` judges "no waist" on the profile's VALUE: a plateau running
   to the window's end has its first minimum a few px short of the end, so
-  the index test let it through and the cut was clamped onto the second
-  block's start — the leading "..." (no letters, so outside the block)
-  went to the other lobe. Book 5: 6 pages change, only p38 has text there.
+  an index test lets it through and the cut is clamped onto the second
+  block's start — a leading "..." (no letters, so outside the block) goes
+  to the other lobe.
 - Margin color: art that runs to all four edges in one flat colour (sky,
   sea) reads as PAPER and the margins come out that colour. The rule is
-  kept (coloured stock, dark pages, the UK set's borders); per-page
+  kept (coloured stock, dark pages, printed coloured borders); per-page
   override in untracked `upscaled/<comic>/paper_overrides.json`
   ({source filename: [r,g,b]}), read when compose writes numbers.txt —
   delete the page's .xcf/.pdf to recompose it.
 - Two cheap size metrics catch "text too small" before the user does:
-  `new_cap_h < old_cap_h` (the balloon demonstrably had room — 18 bubbles
-  book-wide, and every page the user reported was among the worst of them),
-  and dialogue set well under the book size.
-- Transcripts: one string per bubble in bNN order; `*word*` = bold-italic;
-  `\n` = hard break (hyphenation, or mirroring the original's line
-  structure); `\n\n` = paragraph; `""` = leave untouched (SFX, display
-  shouts/onomatopeia outside bubbles, art false positives). Bubble order
-  keys on the TEXT BLOCK (y,x). New-bubble transcripts anchor to BLOCK
-  COORDS printed by detection, never crop-order guesses.
+  `new_cap_h < old_cap_h` (the balloon demonstrably had room — the pages a
+  reviewer reports are reliably among the worst of these), and dialogue set
+  well under the book size.
+- Transcripts: one string per bubble in bNN order, keyed `"<short> bNN"`
+  where `<short>` = `make_sheets.short_key` (issue-page; a dotted issue
+  keeps its decimals and letter suffix, "7.02a-003"). It is THE key —
+  overrides call the same function, never a copy of its regex — and
+  make_sheets refuses two pages with bubbles sharing one. `*word*` =
+  bold-italic; `\*` = literal asterisk (footnote mark); `\n` = hard break
+  (hyphenation, or mirroring the original's line structure); `\n\n` =
+  paragraph; `""` = leave untouched (SFX, display shouts/onomatopeia outside
+  bubbles, art false positives). Bubble order keys on the TEXT BLOCK (y,x).
+  New-bubble transcripts anchor to BLOCK COORDS printed by detection, never
+  crop-order guesses.
 - Fit: book size = 35th percentile of per-bubble maxima; dialogue capped at
   max(book, original size); grouped lobes share the group's smallest size;
   margin notes near their original (measure cap-height ratio from the font,

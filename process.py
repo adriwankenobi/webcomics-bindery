@@ -1688,6 +1688,16 @@ def ensure_pristine(upscaled_dir: Path, work: Path) -> None:
           f"{len(image_files(upscaled_dir)) - copied} already present")
 
 
+def undetected_pages(work: Path, pages_dir: Path) -> list:
+    """Stems in pages_dir with no bubbles/<stem>.json. Detection writes one
+    per page (even a skipped one), so a non-empty list after it has started
+    means the run was interrupted part-way — not that it finished."""
+    if not pages_dir.is_dir():
+        return []
+    return [p.stem for p in image_files(pages_dir)
+            if not (work / "bubbles" / f"{p.stem}.json").is_file()]
+
+
 def reletter_status(work: Path, xcf_dir: Path) -> list:
     """The upfront table: (step, state) per relettering marker, so a resumed
     run shows where it stands before doing anything. States are "pending",
@@ -1695,13 +1705,16 @@ def reletter_status(work: Path, xcf_dir: Path) -> list:
     fitted = (work / "layout.json").is_file()
     manifest = work / "sheets" / "manifest.json"
     pristine = work / "pristine"
+    undetected = undetected_pages(work, pristine)
     rows = [
         ("pristine copies",
          "n/a (fit already ran)" if fitted
          else "done" if pristine.is_dir() and image_files(pristine)
          else "pending"),
         ("bubble detection",
-         "done" if any((work / "bubbles").glob("*.json")) else "pending"),
+         "pending" if not any((work / "bubbles").glob("*.json"))
+         else f"interrupted ({len(undetected)} pages undetected)" if undetected
+         else "done"),
         ("contact sheets", "done" if manifest.is_file() else "pending"),
     ]
     if manifest.is_file():
@@ -1802,11 +1815,24 @@ def cmd_reletter_book(comic_dir: Path, upscaled_dir: Path, xcf_dir: Path,
         ensure_pristine(upscaled_dir, work)
 
     step("bubble detection")
-    if any((work / "bubbles").glob("*.json")):
+    undetected = undetected_pages(work, upscaled_dir)
+    if any((work / "bubbles").glob("*.json")) and not undetected:
         print(f"done: {_rel(work / 'bubbles')} exists. Detection is never "
               "re-run automatically (it could reorder bubbles under the "
               "transcripts); re-detect single pages per ARCHITECTURE.md.")
+    elif undetected and (fitted or any((work / "parts").glob("*.json"))):
+        print(f"!! {len(undetected)} pages have no detection (first: "
+              f"{undetected[0]}), but transcripts already exist — a full "
+              "re-detect could reorder bubbles under them. Detect those pages "
+              "by hand per ARCHITECTURE.md, then re-run.")
+        return 1
     else:
+        if any((work / "bubbles").glob("*.json")):
+            # an interrupted run left a partial set; detection restarts from
+            # scratch, and sheets made from the partial set are stale
+            print(f"interrupted: {len(undetected)} pages have no detection — "
+                  "re-running it for the whole book")
+            (work / "sheets" / "manifest.json").unlink(missing_ok=True)
         rc = run_reletter_script("reletter_detect.py", name)
         if rc != 0:
             return rc

@@ -1,4 +1,4 @@
-# QA + rebuild tooling (built during the Sep 13-14 2026 feedback rounds)
+# QA + rebuild tooling
 
 All scripts assume CWD = repo root and take **the comic name as argv[1]**,
 like every other script in the pipeline:
@@ -36,12 +36,11 @@ of one by the end.
                            failed cleaning. Healthy: <20 book-wide.
                            `PAGES=<dir>` to scan a candidate dir.
                            Searches the mask UNION the text block UNION every
-                           laid-out line's box. Until round 4 it intersected
-                           with the MASK alone, which hid the worst failure
-                           mode there is — lettering the mask never covered is
-                           precisely what puts new text on top of old — and it
-                           reported "14 blobs, healthy" while p170 and p147
-                           carried whole lines of old text under the new.
+                           laid-out line's box. Never intersect with the MASK
+                           alone: that hides the worst failure mode there is —
+                           lettering the mask never covered is precisely what
+                           puts new text on top of old — and reads "healthy"
+                           while whole lines of old text stand under the new.
                            STILL BLIND TO: text on a coloured fill (letter_mask
                            is a "dark text on light paper" ring test), and
                            faint residue above the ink cut-off. Look at pages.
@@ -51,10 +50,9 @@ of one by the end.
                            Blind by construction to the cases users report: a
                            leaked mask is exactly what puts text outside the
                            balloon, and protrude.py measures against that same
-                           mask, so it flagged none of p45/p65/p127. Measure
-                           against the balloon's own fill (bubble_interior of
-                           the pristine page) instead — that ranks p65 b07 15th
-                           of 67 and finds the unreviewed 168/170/253/219.
+                           mask, so it misses exactly those. Measure against
+                           the balloon's own fill (bubble_interior of the
+                           pristine page) instead — that is `outside.py`.
 - `preview.py` / `montage.py`
                            render layout.json's text onto the cleaned page with
                            PIL — placement check in SECONDS, no GIMP pass.
@@ -78,12 +76,12 @@ of one by the end.
                           leftover.py only looks where the transcript HAS
                           text (an empty one means "leave it", by design) and
                           qa_scan diffs against pristine, where an untouched
-                          region is identical. Round 7 found 68 entries on 49
-                          pages this way, incl. 5 of p287's 6 caption boxes:
-                          detection splits a graded box into strips, so the
+                          region is identical. Typical find: a graded caption
+                          box that detection split into strips, so the
                           transcription sheet showed each line cut in half and
-                          the strip was blanked. Droid speech (p204) is
-                          deliberately original — check the list by eye.
+                          the strip was blanked. Some entries are deliberately
+                          left original (a stylised alien/robot font) — check
+                          the list by eye.
 - `capbox_scan.py`        every laid-out line of a caption box measured
                           against the BOX rectangle (`PGS=` to narrow).
                           outside.py cannot stand in: it skips `tint` strips
@@ -147,12 +145,12 @@ All of these take `SP=<scratch dir>` for their output (default
 - `reletter_fit.main()` crashes on an empty `gains` list at the very END (after
   layout.json is written) when no bubble fits — harmless, pre-existing.
 
-## Round 7 additions (Sep 18 2026)
+## Inspection and subset-rebuild helpers
 - `dump.py <pages>`       per-page dump: every bubble's kind/bbox/block/group
                           beside its layout entry and its transcript. The
                           first thing to run on a reported page.
 - `tsheet.py`             labelled crops for transcription:
-                          `ITEMS=287:1,287:2 VPAD=75 ZOOM=1.6 MAXW=840`.
+                          `ITEMS=<page>:<bi>,... VPAD=75 ZOOM=1.6 MAXW=840`.
                           A split caption box is only HALF a box — pad
                           vertically or the first line is cut off and the
                           strip reads as unintelligible (which is why those

@@ -139,7 +139,9 @@ Fill the parts files (yourself, or by handing the sheets to an assistant),
 press Enter, and it carries on to the finished book PDF. Without a terminal
 it prints the same block and exits; re-running the command resumes. Every
 step is skipped by a filesystem marker, so the command is safe to re-run at
-any point: `pristine/` non-empty, `bubbles/*.json`, `sheets/manifest.json`,
+any point: `pristine/` non-empty, `bubbles/<stem>.json` for every page (a
+partial set = an interrupted detection, re-run whole while no transcripts
+exist), `sheets/manifest.json`,
 `layout.json` (the fit is **never** re-run automatically — it re-encodes
 every working page), and for the GIMP text pass a `qa/<stem>.png` newer
 than the page's `.xcf`. The preflight refuses to start without the fonts,
@@ -187,7 +189,8 @@ relettering/qa_scan.py "<comic>"           pixel-diff cleaned pages vs
 
 One string per bubble, in `bNN` order (bubbles sort by text-block
 position, so transcripts stay aligned even when masks change);
-`*word*` = bold-italic; `\n` = hard line break (hyphenation, or mirroring
+`*word*` = bold-italic; `\*` = a literal asterisk (footnote mark); `\n` =
+hard line break (hyphenation, or mirroring
 the original's line structure); `\n\n` = paragraph break (compound
 balloons); `""` = leave the region untouched (SFX, display lettering,
 onomatopoeia overflowing its bubble, art false positives). Covers,

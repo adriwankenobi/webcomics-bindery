@@ -120,7 +120,7 @@ on disk, so the same command resumes after the pause or after a failure.
 | preflight | — | fonts, `.venv-reletter`, GIMP present; refuses to start otherwise |
 | upscale | existing rule | |
 | pristine copies → `pristine/` | dir already holds the page; whole step once `layout.json` exists | `copy2` keeps mtimes; never overwrites |
-| detect | `bubbles/*.json` exists | never re-run automatically: it could reorder bubbles under the transcripts |
+| detect | `bubbles/<stem>.json` exists for EVERY page | never re-run automatically once transcripts exist: it could reorder bubbles under them. A partial set means an interrupted run: with no transcripts yet it re-runs whole (and drops the stale `sheets/manifest.json`); once transcripts exist the driver stops and asks for the missing pages to be detected by hand |
 | sheets | `sheets/manifest.json` exists | |
 | **transcription** | every manifest bubble has a key in `parts/*.json` | else **pause**: prints the sheets/parts paths and the gap count; a terminal blocks on Enter and re-checks, otherwise exit 0 |
 | merge transcripts | — | |
@@ -226,6 +226,11 @@ note). Covers, index/credits and art pages are skipped (`is_story_page`).
 
 `make_sheets.py` packs the bubble crops into sheets; transcription fills
 `parts/sheet-NNN.json` with one string per bubble key (`"<short> bNN"`).
+`<short>` = issue number + page number from the page's filename
+(`short_key`: "Series 13 - Title 012" → `13-012`, a dotted issue keeps its
+decimals and letter suffix: "Series 7.02a 003" → `7.02a-003`). It is THE
+key — the layout overrides use the same function — and `make_sheets.py`
+refuses to run if two pages with bubbles would share one.
 `merge_transcripts.py` assembles `transcripts.json` from all `parts/*.json`
 in **sorted filename order — later files win**, sized by
 `sheets/manifest.json` counts. Fix-up rounds therefore write full-page or
@@ -234,7 +239,8 @@ after the previous) and bump the manifest count when detection changes a
 page's bubble count.
 
 Transcript conventions: verbatim text (typos included — corrections go in
-`typo_fixes.json`), `*word*` = bold-italic, `\n` = hard line break (also
+`typo_fixes.json`), `*word*` = bold-italic, `\*` = literal asterisk
+(footnote mark), `\n` = hard line break (also
 used to mirror the original letterer's line structure or hyphenation when
 the automatic wrap can't), `\n\n` = paragraph (compound balloon), `""` =
 leave the region untouched (SFX, display lettering, onomatopoeia
@@ -286,8 +292,7 @@ the new type at all. `unfound_balloon` floods out from the block; what comes
 back is accepted as the writing area only when it is **narrower than the
 block**, which is the proof that it is an interior (the block runs the width
 of the lettering, so a real interior contains it, while an escaped flood
-comes back wider). Three `open` entries exist book-wide and one is a
-mis-detected balloon.
+comes back wider).
 
 **A mask that leaked past recognition** can be replaced per-comic with
 `{"lobes": [[x0,y0,x1,y1], …]}` in `layout_overrides.json` — one rectangle
@@ -300,12 +305,12 @@ invalidates its positional transcripts.
 Such an entry is also **cleaned one lobe at a time**: `lobes_from_rects`
 returns a `(bbox, block, mask)` job per balloon, the block being the original
 ink inside that interior. Cleaned as one entry the cleaner reads the entry's
-own block — 836x407 across a panel of sky on p276 — and the strict ink term
-repainted the artwork behind the left balloon. Every verification gate that
+own block — which spans every balloon and the sky between them — and the
+strict ink term repaints the artwork behind them. Every verification gate that
 reads a mask PNG applies the override too (`gate_mask` in `leftover.py`,
 `welded.py`, `faint_scan.py`), or it measures a region nothing ever cleaned:
-`letter_mask` found 16 letter-shaped pieces of artwork inside that leaked
-detection mask and the leftover scan read them as failed cleaning.
+`letter_mask` finds letter-shaped pieces of artwork inside a leaked
+detection mask and the leftover scan reads them as failed cleaning.
 
 **Type metrics**: `cap_height` measures the cap glyph's own ink height from
 the font at run time (`cap_ratio`, fontTools glyph bounds / unitsPerEm). It
@@ -314,10 +319,11 @@ rounded out to whole pixels — which claimed 22px where GIMP renders 19 and
 jumped 3px between adjacent sizes. Since `old_cap_h` is measured off the
 original letterer's pixels, the "is the new text at least as big as the
 original?" gate was comparing a model against a measurement and could not
-fail. Measured against the printed PDFs the ratio was 0.864 book-wide.
+fail. Any metric computed from a model has to be checked once against the
+rendered PDF.
 
-**Tracking**: the comic font is ~1.5x wider per unit of cap height than the
-one the source edition used, so a tight balloon cannot hold the original's
+**Tracking**: the comic font can be much wider per unit of cap height than
+the one the source edition used (~1.5x for the default font), so a tight balloon cannot hold the original's
 cap height at natural width. `best_fit` therefore tries, at each size, the
 LOOSEST tracking first and tightens only if it must (`track_steps`, capped
 at 5% of the em — about an 8% narrower line). A balloon with room is never
@@ -332,8 +338,8 @@ is exactly `spacing x (chars - 1)`, which is the model the fit wraps with.
 their original (cap-height ratio measured from the font, never hardcoded);
 joined lobes size INDEPENDENTLY (`lobe_size_caps`), each filling its own
 balloon — they used to share the group's smallest maximum, faithful to the
-original letterer but leaving a pair at 18px beside neighbours at 23px;
-the user chose (Sep 16 2026) to let them differ. `relax_group_caps` now only
+original letterer but leaving a pair visibly smaller than its neighbours;
+letting them differ is a deliberate policy call. `relax_group_caps` now only
 runs for groups that still share one size. A compound balloon returned as a
 single entry is raised per lobe by `grow_lobes` (its lines then carry their
 own `font_px`/`line_height`/`track`, and the GIMP pass falls back to the
@@ -500,8 +506,8 @@ the page's PNG to force it. This mirrors compose's own mtime rule.
 
 **A subset promote ships the layout fix but not the cleaning fix.**
 `promote.py` only compares the pages the subset re-fit staged, so a change
-to `clean_bubble` never reaches the rest of the book: after round 4, 209
-pages still carried round-3 pixels. Re-clean the whole book
+to `clean_bubble` never reaches the rest of the book, which keeps the old
+cleaning's pixels. Re-clean the whole book
 (`reclean_all.py`, ~1.4 min, writes to a scratch dir and touches nothing)
 whenever the cleaning changes, and gate it with the faint-residue scan.
 

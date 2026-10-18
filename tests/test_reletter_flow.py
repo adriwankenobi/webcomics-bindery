@@ -314,3 +314,37 @@ class ReletterStatus(unittest.TestCase):
         self.assertEqual(rows["transcription"], "complete")
         self.assertEqual(rows["fit + clean"], "done")
         self.assertEqual(rows["GIMP text layers"], "done")
+
+
+class UndetectedPages(unittest.TestCase):
+    """Detection writes a json per page, so pages without one after it has
+    started mean an interrupted run — which must not pass as done."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.work = root / "work"
+        self.pages = self.work / "pristine"
+        self.pages.mkdir(parents=True)
+        for n in ("002", "003", "004"):
+            (self.pages / f"Comic {n}.jpg").write_bytes(b"x")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_lists_pages_without_a_detection_json(self):
+        write_json(self.work / "bubbles" / "Comic 002.json", [])
+        self.assertEqual(process.undetected_pages(self.work, self.pages),
+                         ["Comic 003", "Comic 004"])
+
+    def test_status_reports_an_interrupted_detection(self):
+        write_json(self.work / "bubbles" / "Comic 002.json", [])
+        rows = dict(process.reletter_status(self.work, self.work / "xcf"))
+        self.assertEqual(rows["bubble detection"],
+                         "interrupted (2 pages undetected)")
+
+    def test_status_is_done_once_every_page_has_one(self):
+        for n in ("002", "003", "004"):
+            write_json(self.work / "bubbles" / f"Comic {n}.json", [])
+        rows = dict(process.reletter_status(self.work, self.work / "xcf"))
+        self.assertEqual(rows["bubble detection"], "done")

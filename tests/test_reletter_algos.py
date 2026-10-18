@@ -396,6 +396,30 @@ class EmphasisGluedToPunctuation(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_CV2, "cv2 only in .venv-reletter")
+class EscapedFootnoteAsterisk(unittest.TestCase):
+    """A footnote mark is a literal "*", which the markup reads as emphasis.
+    A lone one already stays literal, but only when no other "*" follows:
+    "WORD*, *OTHER*" would open the emphasis at the footnote. Transcripts
+    write it as \\*."""
+
+    def setUp(self):
+        self.fit = load_fit()
+
+    def test_escaped_asterisk_prints_and_never_toggles_emphasis(self):
+        runs = self.fit.parse_runs("IN THE SHIP\\*, *ALPHA*. THE")
+        self.assertEqual(runs, [("regular", "IN"), ("regular", "THE"),
+                                ("regular", "SHIP*,"),
+                                ("bolditalic", "ALPHA."), ("regular", "THE")])
+
+    def test_escaped_asterisk_inside_emphasis_and_leading(self):
+        self.assertEqual(self.fit.parse_runs("\\*TRANSLATED FROM *ALIEN.\\**"),
+                         [("regular", "*TRANSLATED"), ("regular", "FROM"),
+                          ("bolditalic", "ALIEN.*")])
+        self.assertEqual(self.fit.parse_runs("\\* NEXT DAY")[0],
+                         ("regular", "* NEXT"))
+
+
+@unittest.skipUnless(HAVE_CV2, "cv2 only in .venv-reletter")
 class BarePunctuationNeverStandsAlone(unittest.TestCase):
     """A leading "..." is a word of its own to the wrap, and the balance pass
     broke after it: the balloon printed a lone "..." over "EJECUTADLOS." and
