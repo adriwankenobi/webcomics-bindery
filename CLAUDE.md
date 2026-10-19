@@ -59,6 +59,26 @@ session needs:
   to force one page; a recompose forces it too, so the single-page recipe
   no longer prunes layout.json). Postprocess runs only on the stems the
   pass reported RELETTER DONE.
+- KEEP OR RE-LETTER is decided per ISSUE (`issue_of` = the issue part of
+  short_key) after detection, BEFORE the sheets (`reletter_decide.py`,
+  rule in `issue_plan.py`): keep only when the font is similar AND our
+  predicted letters are < SIZE_BAR - UNSURE_MARGIN (1.10 - 0.03) of the
+  original's; either gate saying re-letter wins, unsure re-letters and is
+  listed. The size is predicted by the REAL fit on placeholder text shaped
+  from the original's blobs (two-pass: book on a sample, then search from
+  max(book, original)). The font gate judges the issue's MEDIAN
+  per-balloon difference to our font; no single statistic separated the
+  labelled sets, "wider AND more upright" did. `issue_decisions.json` is
+  written ONCE;
+  `issue_overrides.json` wins (typos stop the run). Kept pages get no
+  sheets/fit/text. A comic whose sheets or layout.json predate the step
+  (no decisions file) = everything re-lettered, the step writes NOTHING
+  there — never create a decisions file (or fit_meta.json) in an approved
+  comic. Flips after the fit: keep -> restore_kept_pages (pristine, drop
+  xcf/pdf/qa — mtime trap; no pristine copy = refused); re-letter ->
+  sheets appended + `reletter_fit.py --add` at fit_meta.json's book size.
+  LAYOUT.JSON is the only authority on which pages are fitted. Calibrate against fitted comics with
+  `qa-tools/decide_calibrate.py` (read-only, $SP/decide/).
 - Steps are resumable: outputs are skipped when they exist. MTIME TRAP:
   compose skips iff xcf mtime >= upscaled mtime — bulk copies into
   upscaled/ must preserve mtimes (`cp -p`) or EVERY page recomposes and

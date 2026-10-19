@@ -50,6 +50,42 @@ class ShortKey(unittest.TestCase):
         ms.check_unique({"a 1 x 002": 3, "a 1 y 002": 0})
 
 
+class IssueOf(unittest.TestCase):
+    """The keep-or-re-letter decision is made per ISSUE, and the issue is the
+    issue part of the transcripts' own key — never a second regex."""
+    CASES = {
+        "Series 6.01 002": "6.01",
+        "Series 7.02a 003": "7.02a",
+        "Series 15 - Title Words 012": "15",
+        "Series 2 - Title 030-1": "2",
+    }
+
+    def test_issue_numbers(self):
+        ms = load()
+        for stem, issue in self.CASES.items():
+            self.assertEqual(ms.issue_of(stem), issue, stem)
+
+    def test_issue_of_unparsable_stem_is_its_own_issue(self):
+        self.assertEqual(load().issue_of("cover"), "cover")
+
+    def test_cover_and_lettered_suffix_pages_stay_in_their_issue(self):
+        # short_key cannot parse these (they don't END in the page number),
+        # but they are still that issue's pages
+        ms = load()
+        self.assertEqual(ms.issue_of(
+            "Series 5 - Title 002 cover"), "5")
+        self.assertEqual(ms.issue_of(
+            "Series 6 - Title 072a"), "6")
+        self.assertEqual(ms.issue_of("Series 7.02a 000 cover"),
+                         "7.02a")
+
+    def test_issue_of_agrees_with_short_key(self):
+        ms = load()
+        for stem in self.CASES:
+            self.assertTrue(
+                ms.short_key(stem).startswith(ms.issue_of(stem) + "-"), stem)
+
+
 try:
     import cv2  # noqa: F401  (reletter_fit needs it; only in .venv-reletter)
     HAVE_CV2 = True

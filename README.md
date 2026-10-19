@@ -135,6 +135,33 @@ Missing:  1839 bubbles on 264 pages
 Press Enter when done  (Ctrl-C to stop; re-run the same command to resume)
 ```
 
+Before the sheets are made, the run decides **per issue** whether to
+re-letter at all (`reletter_decide.py`). The book is printed, so
+re-lettering is only worth it where it makes the letters bigger: an issue
+keeps its original lettering when its font is like ours AND our letters
+would come out less than ~10% taller (predicted by running the real fit on
+placeholder text shaped like the original's lines and words). A kept issue
+gets no sheets, so it is never transcribed, cleaned or typeset — its pages
+compose as they came out of the upscaler. Either gate saying re-letter
+wins, and an issue the measurement is unsure about is re-lettered and
+listed at the end of the run:
+
+```
+keep original lettering (20): 6.01 (x1.00, font similar), ...
+re-letter (9): 6.15 (x1.14, font similar), ...
+unsure (decided re-letter, 3): 6.04 (x1.08, font similar): ...
+to change one, edit relettering/<comic>/issue_overrides.json ({"<issue>": "keep" | "reletter"}); ...
+```
+
+The decisions are written once (`issue_decisions.json`) and never
+recomputed; flip an issue in `issue_overrides.json` and re-run. A flip to
+re-letter adds that issue's sheets (numbered after the existing ones) and
+stops for its transcription; after the fit it is fitted on its own at the
+comic's book size (`reletter_fit.py --add`). A flip to keep after the fit
+restores its pages from `pristine/` and recomposes them without text. A
+comic whose sheets or fit were made before this step existed has no
+decisions file: everything stays re-lettered and the step writes nothing.
+
 Fill the parts files (yourself, or by handing the sheets to an assistant),
 press Enter, and it carries on to the finished book PDF. Without a terminal
 it prints the same block and exits; re-running the command resumes. Every
@@ -158,7 +185,10 @@ argument:
 ```
 relettering/reletter_detect.py "<comic>"   text-first bubble detection
    -> relettering/<comic>/bubbles/ (per-page JSON + mask/crop PNGs)
+relettering/reletter_decide.py "<comic>"   keep or re-letter, per issue
+   -> relettering/<comic>/issue_decisions.json (written once)
 relettering/make_sheets.py "<comic>"       pack bubble crops into sheets
+   (re-lettered issues only; re-run = sync a flipped issue)
    (transcribe sheets -> relettering/<comic>/parts/sheet-NNN.json, then:)
 relettering/merge_transcripts.py "<comic>" -> transcripts.json
 relettering/reletter_fit.py "<comic>"      fits text -> layout.json and
@@ -178,6 +208,10 @@ relettering/qa_scan.py "<comic>"           pixel-diff cleaned pages vs
 - `parts/sheet-NNN.json` — transcriptions; `parts/zz-*.json` — later
   override rounds (merge order is sorted filename, **later wins**; when a
   page's bubble count changes, update `sheets/manifest.json` too).
+- `issue_decisions.json` — the keep-or-re-letter verdict per issue, with
+  its numbers (written once by `reletter_decide.py`); `issue_overrides.json`
+  — `{"<issue>": "keep" | "reletter"}`, always wins (an unknown issue or a
+  bad value stops the run).
 - `typo_fixes.json` — `[wrong, fixed]` pairs applied at typeset time
   (transcripts stay a verbatim record of the source).
 - `layout_overrides.json` — per-bubble taste calls keyed `"<short> bNN"`:

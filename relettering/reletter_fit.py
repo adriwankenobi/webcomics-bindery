@@ -3535,13 +3535,66 @@ def typeset_page(fit, path, pending, clean_jobs, img, bubbles, book,
     return changed, page_entries
 
 
+def stems_to_add(done, transcript_stems, kept):
+    """Transcribed pages a finished fit has not laid out yet (`done` = the
+    layout's pages — the layout is the authority on what is fitted): an
+    issue the user flipped from keep to re-letter after the fit."""
+    done = set(done)
+    return sorted(s for s in transcript_stems
+                  if s not in kept and s not in done)
+
+
+def write_fit_meta(work, book):
+    """The book size, for a later `--add` — only for a comic with
+    keep-or-re-letter decisions: a re-fit of an approved comic (the
+    qa-tools run main() on it) must not leave a new file there."""
+    from issue_plan import DECISIONS
+    if (work / DECISIONS).is_file():
+        (work / "fit_meta.json").write_text(json.dumps({"book": book}))
+
+
+def merge_layout(old, new):
+    """Add newly fitted pages to a layout; a page already in it is never
+    overwritten (that would re-fit an approved page)."""
+    clash = sorted(set(old) & set(new))
+    if clash:
+        raise ValueError(f"already laid out: {', '.join(clash[:5])}")
+    return {**old, **new}
+
+
 def main():
+    from issue_plan import kept_stems
+    add = "--add" in sys.argv
     transcripts = json.loads((WORK / "transcripts.json").read_text())
+    meta_path = WORK / "fit_meta.json"
     fit = Fitter()
     layout = {}
     report = []
     all_pending = []
-    for path in sorted(PAGES_DIR.glob("*.jpg")) + sorted(PAGES_DIR.glob("*.png")):
+    paths = sorted(PAGES_DIR.glob("*.jpg")) + sorted(PAGES_DIR.glob("*.png"))
+    # a kept issue (issue_plan) keeps its original lettering: never cleaned
+    kept = kept_stems(WORK, [q.stem for q in paths])
+    if add:
+        # pages of an issue flipped to re-letter after the fit: fitted on
+        # their own at the book size the comic already has, merged into
+        # the layout without touching a page that is in it
+        if not meta_path.is_file():
+            sys.exit(f"--add needs {meta_path} (the book size of the first "
+                     "fit) — it is missing")
+        meta = json.loads(meta_path.read_text())
+        old_layout = json.loads((WORK / "layout.json").read_text())
+        todo = set(stems_to_add(old_layout, transcripts, kept))
+        if not todo:
+            print("nothing to add")
+            return
+        global BOOK_PIN
+        BOOK_PIN = meta["book"]
+        print(f"--add: fitting {len(todo)} pages at the book size "
+              f"{BOOK_PIN}px")
+        paths = [q for q in paths if q.stem in todo]
+    for path in paths:
+        if path.stem in kept:
+            continue
         collect_page(path, transcripts, all_pending)
 
     # ---- global fitting ----
@@ -3610,13 +3663,17 @@ def main():
               f"{'' if changed else ' (page unchanged)'}"
               f" — ~{eta / 60:.0f} min left", flush=True)
 
+    if add:
+        layout = merge_layout(old_layout, layout)
     (WORK / "layout.json").write_text(json.dumps(layout, indent=1))
+    write_fit_meta(WORK, book)      # what --add needs later
     gains = [g for *_, g in report if g]
     print("\nsize gain per bubble (new/old cap height):")
     for stem, bi, oh, nh, g in report:
         print(f"  {stem} b{bi:02d}: {oh:.0f}px -> {nh:.0f}px  x{g:.2f}")
-    print(f"median gain: x{np.median(gains):.2f}, "
-          f"min x{min(gains):.2f}, max x{max(gains):.2f}")
+    if gains:       # an --add of pages with no dialogue has none
+        print(f"median gain: x{np.median(gains):.2f}, "
+              f"min x{min(gains):.2f}, max x{max(gains):.2f}")
 
 
 def consolidate(word_runs):

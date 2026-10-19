@@ -348,3 +348,197 @@ class UndetectedPages(unittest.TestCase):
             write_json(self.work / "bubbles" / f"Comic {n}.json", [])
         rows = dict(process.reletter_status(self.work, self.work / "xcf"))
         self.assertEqual(rows["bubble detection"], "done")
+
+
+KEPT = "Series 6.01 002"
+RELET = "Series 6.28 004"
+
+
+def plan_dir(work, keep=("6.01",), relet=("6.28",)):
+    """A work dir with detection done for one kept and one re-letter page."""
+    write_json(work / "bubbles" / f"{KEPT}.json", [{}, {}])
+    write_json(work / "bubbles" / f"{RELET}.json", [{}])
+    write_json(work / "issue_decisions.json", {
+        **{i: {"decision": "keep", "unsure": False} for i in keep},
+        **{i: {"decision": "reletter", "unsure": False} for i in relet}})
+
+
+def manifest(work, stems):
+    sys.path.insert(0, str(REPO / "relettering"))
+    from make_sheets import short_key
+    write_json(work / "sheets" / "manifest.json",
+               {short_key(s): {"stem": s, "count": 1} for s in stems})
+
+
+class KeepOrReletterPlan(unittest.TestCase):
+    """The driver follows the per-issue keep-or-re-letter plan: kept issues
+    get no sheets, no fit and no text pass; a flip either way is synced on
+    the next run."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.work = self.root / "work"
+        self.work.mkdir()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_sheets_in_sync_legacy_manifest(self):
+        write_json(self.work / "bubbles" / f"{KEPT}.json", [{}])
+        self.assertFalse(process.sheets_in_sync(self.work))
+        manifest(self.work, [])
+        self.assertTrue(process.sheets_in_sync(self.work))
+
+    def test_sheets_in_sync_follows_plan(self):
+        plan_dir(self.work)
+        self.assertFalse(process.sheets_in_sync(self.work))
+        manifest(self.work, [RELET])
+        self.assertTrue(process.sheets_in_sync(self.work))
+        manifest(self.work, [KEPT, RELET])
+        self.assertFalse(process.sheets_in_sync(self.work))
+        manifest(self.work, [RELET])
+        write_json(self.work / "issue_overrides.json", {"6.01": "reletter"})
+        self.assertFalse(process.sheets_in_sync(self.work))
+
+    def test_reletter_pages(self):
+        plan_dir(self.work)
+        self.assertEqual(process.reletter_pages(self.work), [RELET])
+
+    def test_pending_add(self):
+        plan_dir(self.work)
+        write_json(self.work / "layout.json", {RELET: []})
+        write_json(self.work / "fit_meta.json", {"book": 20})
+        self.assertEqual(process.pending_add(self.work), [])
+        write_json(self.work / "issue_overrides.json", {"6.01": "reletter"})
+        self.assertEqual(process.pending_add(self.work), [KEPT])
+
+    def test_pending_add_trusts_the_layout_not_fit_meta(self):
+        """A page in layout.json IS fitted, whatever a side file says: a
+        stale stems list re-cleaned approved pages."""
+        plan_dir(self.work)
+        write_json(self.work / "layout.json", {RELET: []})
+        write_json(self.work / "fit_meta.json", {"book": 20, "stems": []})
+        self.assertEqual(process.pending_add(self.work), [])
+
+    def test_restore_refuses_a_page_with_no_pristine_copy(self):
+        up, xcf, pdf = (self.root / d for d in ("up", "xcf", "pdf"))
+        for d in (up, xcf, pdf, self.work / "pristine"):
+            d.mkdir(parents=True, exist_ok=True)
+        (up / f"{KEPT}.jpg").write_bytes(b"cleaned")
+        (xcf / f"{KEPT}.xcf").write_bytes(b"x")
+        write_json(self.work / "layout.json", {KEPT: []})
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            got = process.restore_kept_pages(self.work, up, xcf, pdf, {KEPT})
+        self.assertEqual(got, [])
+        self.assertIn("!!", out.getvalue())
+        self.assertTrue((xcf / f"{KEPT}.xcf").exists())
+        self.assertEqual(
+            list(json.loads((self.work / "layout.json").read_text())), [KEPT])
+
+    def test_override_typo_is_a_clear_error_not_a_traceback(self):
+        plan_dir(self.work)
+        write_json(self.work / "issue_overrides.json", {"6.99": "keep"})
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            rc = process.decide_step(self.work, "comic")
+        self.assertEqual(rc, 1)
+        self.assertIn("6.99", out.getvalue())
+
+    def test_unreadable_override_file_names_itself(self):
+        plan_dir(self.work)
+        (self.work / "issue_overrides.json").write_text('{"6.01": keep}')
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            rc = process.decide_step(self.work, "comic")
+        self.assertEqual(rc, 1)
+        self.assertIn("issue_overrides.json", out.getvalue())
+
+    def test_comic_with_sheets_but_no_decisions_is_legacy(self):
+        """Sheets made before this step existed: transcription may be under
+        way, and deciding now could drop transcribed issues to keep."""
+        write_json(self.work / "bubbles" / f"{KEPT}.json", [{}])
+        manifest(self.work, [KEPT])
+        before = sorted(p.name for p in self.work.iterdir())
+        orig = process.run_reletter_script
+        process.run_reletter_script = lambda *a: self.fail("script ran")
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = process.decide_step(self.work, "comic")
+        finally:
+            process.run_reletter_script = orig
+        self.assertEqual(rc, 0)
+        self.assertEqual(sorted(p.name for p in self.work.iterdir()), before)
+
+    def test_restore_kept_pages_forces_recompose(self):
+        import os
+        up, xcf, pdf = (self.root / d for d in ("up", "xcf", "pdf"))
+        for d in (up, xcf, pdf, self.work / "pristine", self.work / "qa"):
+            d.mkdir(parents=True, exist_ok=True)
+        (self.work / "pristine" / f"{KEPT}.jpg").write_bytes(b"pristine")
+        os.utime(self.work / "pristine" / f"{KEPT}.jpg", (100, 100))
+        (up / f"{KEPT}.jpg").write_bytes(b"cleaned")
+        (xcf / f"{KEPT}.xcf").write_bytes(b"x")     # newer than pristine
+        (pdf / f"{KEPT}.pdf").write_bytes(b"x")
+        (self.work / "qa" / f"{KEPT}.png").write_bytes(b"x")
+        write_json(self.work / "layout.json", {KEPT: [], RELET: []})
+        got = process.restore_kept_pages(self.work, up, xcf, pdf, {KEPT})
+        self.assertEqual(got, [KEPT])
+        self.assertEqual((up / f"{KEPT}.jpg").read_bytes(), b"pristine")
+        for f in (xcf / f"{KEPT}.xcf", pdf / f"{KEPT}.pdf",
+                  self.work / "qa" / f"{KEPT}.png"):
+            self.assertFalse(f.exists(), f)
+        self.assertEqual(
+            list(json.loads((self.work / "layout.json").read_text())), [RELET])
+
+    def test_legacy_comic_decision_step_writes_nothing(self):
+        write_json(self.work / "layout.json", {})
+        before = sorted(p.name for p in self.work.iterdir())
+        orig = process.run_reletter_script
+        process.run_reletter_script = lambda *a: self.fail("script ran")
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = process.decide_step(self.work, "comic")
+        finally:
+            process.run_reletter_script = orig
+        self.assertEqual(rc, 0)
+        self.assertEqual(sorted(p.name for p in self.work.iterdir()), before)
+
+    def test_all_kept_comic_skips_fit_and_gimp(self):
+        name = "comic"
+        reldir = self.root / "relettering"
+        work = reldir / name
+        up = self.root / "upscaled"
+        up.mkdir()
+        (up / f"{KEPT}.jpg").write_bytes(b"x")
+        write_json(work / "bubbles" / f"{KEPT}.json", [{}])
+        calls = []
+
+        def script(s, n):
+            calls.append(s)
+            if s == "reletter_decide.py":
+                write_json(work / "issue_decisions.json",
+                           {"6.01": {"decision": "keep", "unsure": False}})
+            if s == "make_sheets.py":
+                write_json(work / "sheets" / "manifest.json", {})
+            return 0
+        patches = {
+            "RELETTER_DIR": reldir, "reletter_preflight": lambda: [],
+            "cmd_upscale": lambda *a, **k: 0,
+            "cmd_compose": lambda *a, **k: calls.append("compose") or 0,
+            "cmd_merge": lambda *a, **k: calls.append("merge") or 0,
+            "run_reletter_script": script,
+            "run_gimp_text_pass": lambda *a: self.fail("GIMP ran"),
+        }
+        saved = {k: getattr(process, k) for k in patches}
+        for k, v in patches.items():
+            setattr(process, k, v)
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = process.cmd_reletter_book(
+                    self.root / name, up, self.root / "xcf",
+                    self.root / "pdf", self.root / "book.pdf")
+        finally:
+            for k, v in saved.items():
+                setattr(process, k, v)
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls, ["reletter_decide.py", "make_sheets.py",
+                                 "compose", "merge"])

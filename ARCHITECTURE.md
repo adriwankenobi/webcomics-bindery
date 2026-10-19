@@ -121,10 +121,11 @@ on disk, so the same command resumes after the pause or after a failure.
 | upscale | existing rule | |
 | pristine copies → `pristine/` | dir already holds the page; whole step once `layout.json` exists | `copy2` keeps mtimes; never overwrites |
 | detect | `bubbles/<stem>.json` exists for EVERY page | never re-run automatically once transcripts exist: it could reorder bubbles under them. A partial set means an interrupted run: with no transcripts yet it re-runs whole (and drops the stale `sheets/manifest.json`); once transcripts exist the driver stops and asks for the missing pages to be detected by hand |
-| sheets | `sheets/manifest.json` exists | |
+| **keep or re-letter** | `issue_decisions.json` exists; skipped (writes nothing) for a comic whose `sheets/manifest.json` or `layout.json` predates it | `reletter_decide.py`: per-issue verdict, written ONCE; `issue_overrides.json` wins. See "Stage 1.5" |
+| sheets | `sheets/manifest.json` exists (legacy); with decisions: the manifest holds exactly the re-lettered pages | a flipped issue is synced: kept pages leave the manifest, new pages get sheets numbered after the last one, existing sheets untouched |
 | **transcription** | every manifest bubble has a key in `parts/*.json` | else **pause**: prints the sheets/parts paths and the gap count; a terminal blocks on Enter and re-checks, otherwise exit 0 |
 | merge transcripts | — | |
-| fit + clean | `layout.json` exists | never re-run automatically (re-encodes every working page) |
+| fit + clean | `layout.json` exists | never re-run automatically (re-encodes every working page). With decisions, once fitted: issues flipped to keep are restored from `pristine/` (layout entry, XCF, PDF, QA render dropped), issues flipped to re-letter are fitted on their own at the book size in `fit_meta.json` (`--add`; written only for a comic with decisions). `layout.json` alone says which pages are fitted; a kept page with no pristine copy is refused, not blanked. Every issue kept = no transcription, fit, GIMP pass or qa_scan |
 | compose | existing mtime rule | cleaned pages are newer → recomposed |
 | GIMP text pass | per page: `qa/<stem>.png` mtime ≥ `.xcf` mtime | see Stage 4 |
 | postprocess | — | only the stems the pass reported `RELETTER DONE`, so no PDF is recompressed twice |
@@ -221,6 +222,57 @@ Bubble kinds: `bubble` (masked balloon), `dark` (white-on-black caption →
 white text), `tint` (dark text on tinted box → row-median clean, black
 text), `open` (grown rectangle on light ground), `margin` (page-margin
 note). Covers, index/credits and art pages are skipped (`is_story_page`).
+
+### Stage 1.5 — keep or re-letter (`reletter_decide.py`, `issue_plan.py`)
+
+The book is printed: re-lettering exists to make the letters bigger. Some
+letterers already filled their balloons with a hand much like ours, and
+there re-lettering buys nothing (our font is wider per unit of cap height,
+so a full balloon can even come out SMALLER) and costs a transcription.
+So, per ISSUE (`make_sheets.issue_of` — the issue part of the transcript
+key; one issue = one letterer, so all of its pages or none), before the
+sheets:
+
+- **Size gate.** The words are unknown before transcription, their SHAPE
+  is not: the letter blobs (`block_letters` in each block) give the lines,
+  the word breaks (a gap wider than `WORD_GAP` x the cap height) and the
+  letters per word (blob width / the page's median letter width — touching
+  letters merge). Placeholder text of that shape (cycled alphabet, no
+  language's frequencies) goes through the REAL fit: `collect_page` /
+  `prepare_bubble` / `best_fit`, so our font's width, tracking,
+  hyphenation and the balloon's profile count exactly as they will. Sizing
+  is two-pass (`size_entries`): the book size is estimated on every 5th
+  balloon at `BOOK_ESTIMATE_PCTL` (30, not the fit's 35: placeholder text
+  fits a hair more easily than real words, so at 35 the estimate ran a
+  step high; any lower and it starts keeping issues that must be
+  re-lettered), then every balloon searches down from
+  max(book, original) — the dialogue clamp means nothing above that
+  matters. Ratio = median predicted `cap_height(size) / old_cap_h`. With the
+  REAL book the predicted ratios match the fitted comics' to the step.
+  The placeholder also marks a word bold (`*...*`, our bold-italic sets
+  ~12% wider) where its strokes run `BOLD_STROKE` x the balloon's median,
+  takes letters from the block grown by half a letter height (the block
+  can stop short of the lettering), and counts a merged blob by its own
+  height x the page's single-letter width/height ratio.
+- **Font gate.** `shape_stats` of the original's letters (width/height,
+  stroke/height, slant, share of short letters) minus the same of our font
+  rendered at the same cap height (`font_reference`), per balloon; the
+  issue is judged on the MEDIAN difference (`issue_font`), so a few special
+  voices cannot move it. Within `FONT_TOL` on every statistic = similar,
+  twice that on any = different, and a hand that is WIDER (`WIDER`) AND
+  MORE UPRIGHT (`UPRIGHT`) than ours at once = different: on the labelled
+  calibration set no single statistic separates the two groups, the pair
+  does. Fewer than `FONT_MIN_BALLOONS`
+  measurable balloons = unsure.
+- **Rule** (`issue_plan.decide_issue`): keep only when the font is similar
+  AND the ratio is below `SIZE_BAR - UNSURE_MARGIN` (1.10 - 0.03). Either
+  gate saying re-letter wins; unsure (font unsure, ratio within the margin
+  of the bar) re-letters and is listed.
+
+`issue_decisions.json` is written once and never recomputed — like
+detection, a re-run must not move an issue that was transcribed or
+approved. `qa-tools/decide_calibrate.py` checks the measurements against an
+already-fitted comic (read-only; results under `$SP/decide/`).
 
 ### Stage 2 — transcription
 

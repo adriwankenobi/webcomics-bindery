@@ -1688,6 +1688,117 @@ def ensure_pristine(upscaled_dir: Path, work: Path) -> None:
           f"{len(image_files(upscaled_dir)) - copied} already present")
 
 
+def _issue_plan():
+    """relettering/issue_plan.py: pure, so it imports under this venv."""
+    path = str(REPO / "relettering")
+    if path not in sys.path:
+        sys.path.insert(0, path)
+    import issue_plan
+    return issue_plan
+
+
+def _page_counts(work: Path) -> dict:
+    """{stem: detected entries} for every page with at least one."""
+    import json
+    counts = {j.stem: len(json.loads(j.read_text()))
+              for j in sorted((work / "bubbles").glob("*.json"))}
+    return {s: n for s, n in counts.items() if n}
+
+
+def reletter_pages(work: Path) -> list:
+    """Pages with lettering whose issue is re-lettered (all of them for a
+    comic with no keep-or-re-letter decisions)."""
+    counts = _page_counts(work)
+    kept = _issue_plan().kept_stems(work, counts)
+    return [s for s in counts if s not in kept]
+
+
+def sheets_in_sync(work: Path) -> bool:
+    """The contact sheets are done. Legacy comic (no decisions): the
+    manifest exists, as always. With decisions: the manifest holds exactly
+    the re-lettered pages — a flip either way makes it stale."""
+    import json
+    path = work / "sheets" / "manifest.json"
+    if not path.is_file():
+        return False
+    if _issue_plan().load_plan(work) is None:
+        return True
+    have = {v["stem"] for v in json.loads(path.read_text()).values()}
+    return have == set(reletter_pages(work))
+
+
+def pending_add(work: Path) -> list:
+    """Re-lettered pages the finished fit never laid out — an issue flipped
+    from keep to re-letter after the fit (fitted by `reletter_fit --add`).
+    The LAYOUT is the authority on what is fitted: a page in it was fitted,
+    whatever any side file says."""
+    import json
+    lpath = work / "layout.json"
+    if _issue_plan().load_plan(work) is None or not lpath.is_file():
+        return []
+    done = set(json.loads(lpath.read_text()))
+    return [s for s in reletter_pages(work) if s not in done]
+
+
+def restore_kept_pages(work: Path, upscaled_dir: Path, xcf_dir: Path,
+                       pdf_dir: Path, kept: set) -> list:
+    """An issue flipped to KEEP after the fit: put its pages back as the
+    upscaler made them (pristine/), drop them from the layout, and delete
+    their XCF/PDF/QA render — the restored page is OLDER than its XCF, so
+    the compose mtime rule would otherwise keep the re-lettered XCF. A page
+    with no pristine copy is refused and left exactly as it is: dropping its
+    text without its original lettering would ship a blank balloon."""
+    import json
+    import shutil
+    lpath = work / "layout.json"
+    layout = json.loads(lpath.read_text())
+    restored = []
+    for stem in sorted(s for s in kept if s in layout):
+        src = next((work / "pristine" / (stem + ext)
+                    for ext in sorted(IMAGE_EXTS)
+                    if (work / "pristine" / (stem + ext)).is_file()), None)
+        if src is None:
+            print(f"!! {stem}: kept, but no pristine copy to restore it from "
+                  "— left re-lettered (restore the page by hand)")
+            continue
+        shutil.copy2(src, upscaled_dir / src.name)
+        for f in (xcf_dir / f"{stem}.xcf", pdf_dir / f"{stem}.pdf",
+                  work / "qa" / f"{stem}.png"):
+            f.unlink(missing_ok=True)
+        del layout[stem]
+        restored.append(stem)
+    if restored:
+        lpath.write_text(json.dumps(layout, indent=1))
+    return restored
+
+
+def print_decisions(work: Path) -> None:
+    for line in _issue_plan().report_lines(work):
+        print(f"  {line}")
+
+
+def decide_step(work: Path, name: str) -> int:
+    """Keep the original lettering or re-letter, per issue — before the
+    sheets, so a kept issue is never transcribed. Decided once."""
+    plan = _issue_plan()
+    if (work / plan.DECISIONS).is_file():
+        print(f"done: {_rel(work / plan.DECISIONS)} exists")
+        try:
+            print_decisions(work)
+        except ValueError as e:         # a typo in issue_overrides.json
+            print(f"!! {e}")
+            return 1
+        return 0
+    if ((work / "layout.json").is_file()
+            or (work / "sheets" / "manifest.json").is_file()):
+        # sheets made (or a fit run) before this step existed: deciding now
+        # could drop issues that are already transcribed to keep
+        print("legacy comic: every issue re-lettered (sheets made before "
+              "this step existed)")
+        return 0
+    return run_reletter_script("reletter_decide.py", name)
+
+
 def undetected_pages(work: Path, pages_dir: Path) -> list:
     """Stems in pages_dir with no bubbles/<stem>.json. Detection writes one
     per page (even a skipped one), so a non-empty list after it has started
@@ -1734,11 +1845,12 @@ def reletter_status(work: Path, xcf_dir: Path) -> list:
     return rows
 
 
-def run_reletter_script(script: str, name: str) -> int:
+def run_reletter_script(script: str, name: str, *args: str) -> int:
     """One relettering/ script under its own venv (cv2 lives only there),
     output streamed through."""
-    cmd = [str(RELETTER_PY), str(RELETTER_DIR / script), name]
-    print(f"$ .venv-reletter/bin/python relettering/{script} \"{name}\"",
+    cmd = [str(RELETTER_PY), str(RELETTER_DIR / script), name, *args]
+    print(f"$ .venv-reletter/bin/python relettering/{script} \"{name}\""
+          + "".join(f" {a}" for a in args),
           flush=True)   # keep our output ahead of the child's in a log file
     return subprocess.call(cmd, cwd=REPO)
 
@@ -1837,31 +1949,61 @@ def cmd_reletter_book(comic_dir: Path, upscaled_dir: Path, xcf_dir: Path,
         if rc != 0:
             return rc
 
+    step("keep or re-letter")
+    rc = decide_step(work, name)
+    if rc != 0:
+        return rc
+    try:
+        planned = _issue_plan().load_plan(work) is not None
+    except ValueError as e:         # a typo in issue_overrides.json
+        print(f"!! {e}")
+        return 1
+
     step("contact sheets")
-    if (work / "sheets" / "manifest.json").is_file():
+    if sheets_in_sync(work):
         print(f"done: {_rel(work / 'sheets' / 'manifest.json')} exists")
     else:
         rc = run_reletter_script("make_sheets.py", name)
         if rc != 0:
             return rc
 
-    step("transcription")
-    if not wait_for_transcripts(work):
-        return 0
-    print("complete")
-    rc = run_reletter_script("merge_transcripts.py", name)
-    if rc != 0:
-        return rc
-
-    step("fit + clean")
-    if fitted:
-        print(f"done: {_rel(work / 'layout.json')} exists. A global refit is "
-              "never automatic (it re-encodes every working page); to redo "
-              "one page follow the single-page recipe in ARCHITECTURE.md.")
+    lettering = bool(reletter_pages(work)) or fitted
+    if not lettering:
+        print("\nevery issue keeps its original lettering: no transcription, "
+              "fit or text pass")
     else:
-        rc = run_reletter_script("reletter_fit.py", name)
+        step("transcription")
+        if transcript_gaps(work) and planned:
+            print_decisions(work)
+        if not wait_for_transcripts(work):
+            return 0
+        print("complete")
+        rc = run_reletter_script("merge_transcripts.py", name)
         if rc != 0:
             return rc
+
+        step("fit + clean")
+        if fitted:
+            print(f"done: {_rel(work / 'layout.json')} exists. A global "
+                  "refit is never automatic (it re-encodes every working "
+                  "page); to redo one page follow the single-page recipe in "
+                  "ARCHITECTURE.md.")
+            if planned:
+                kept = _issue_plan().kept_stems(work, _page_counts(work))
+                back = restore_kept_pages(work, upscaled_dir, xcf_dir,
+                                          pdf_dir, kept)
+                if back:
+                    print(f"{len(back)} pages of issues now KEPT restored "
+                          "from pristine/ (recomposed without text)")
+                if pending_add(work):
+                    rc = run_reletter_script("reletter_fit.py", name,
+                                             "--add")
+                    if rc != 0:
+                        return rc
+        else:
+            rc = run_reletter_script("reletter_fit.py", name)
+            if rc != 0:
+                return rc
 
     step("compose")
     rc = cmd_compose(upscaled_dir, xcf_dir, pdf_dir, comic_dir)
@@ -1869,7 +2011,8 @@ def cmd_reletter_book(comic_dir: Path, upscaled_dir: Path, xcf_dir: Path,
         return rc
 
     step("GIMP text layers")
-    pending = gimp_pending_stems(work, xcf_dir)
+    pending = (gimp_pending_stems(work, xcf_dir)
+               if (work / "layout.json").is_file() else [])
     if not pending:
         print("done: every laid-out page has a QA render newer than its XCF")
     else:
@@ -1890,10 +2033,14 @@ def cmd_reletter_book(comic_dir: Path, upscaled_dir: Path, xcf_dir: Path,
     if rc != 0:
         return rc
 
-    step("QA scan (report only)")
-    if run_reletter_script("qa_scan.py", name) != 0:
-        print("qa_scan flagged pages — review them per ARCHITECTURE.md "
-              "'Verification tooling' (the book PDF is built regardless)")
+    if (work / "layout.json").is_file():
+        step("QA scan (report only)")
+        if run_reletter_script("qa_scan.py", name) != 0:
+            print("qa_scan flagged pages — review them per ARCHITECTURE.md "
+                  "'Verification tooling' (the book PDF is built regardless)")
+    if planned:
+        step("keep or re-letter (summary)")
+        print_decisions(work)
     return 0
 
 

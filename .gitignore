@@ -36,6 +36,7 @@
 !/relettering/qa-tools/split_caps.py
 !/relettering/qa-tools/gate_split.py
 !/relettering/qa-tools/boxleft.py
+!/relettering/qa-tools/decide_calibrate.py
 # comic fonts are licensed material: the user supplies them locally —
 # see relettering/fonts/README.md (only the instructions are tracked)
 !/relettering/fonts/
