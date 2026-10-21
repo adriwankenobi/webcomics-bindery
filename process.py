@@ -9,6 +9,9 @@ Steps (each is resumable — already-produced files are skipped):
   upscale  scale each page to exactly its size on the canvas; horizontal
            spreads go through the AI whole, then split into -1/-2 halves
   compose  GIMP: place each upscaled image on the template -> xcf/ + pdf/
+  merge    book PDF pdf/<comic>.pdf; first writes the comparison PDF
+  compare  pdf/<comic> - comparison.pdf only: original | final, page N =
+           book page N
 
 Layout (relative to this repo):
   <comic folder>/            source images (jpg/png)
@@ -1492,11 +1495,13 @@ def plan_layout(pdfs: list, kinds: list):
     return plan, warnings
 
 
-def cmd_merge(pdf_dir: Path, out_path: Path, upscaled_dir: Path) -> int:
+def cmd_merge(pdf_dir: Path, out_path: Path, upscaled_dir: Path,
+              comic_dir: Path = None) -> int:
     """Concatenate all page PDFs (alphabetical = page order, spread halves
     -1/-2 included) into one book PDF named after the comic folder, inserting
     white pages so index pages land on left-hand pages and split spreads on
-    facing left-right pages."""
+    facing left-right pages. Given the comic folder, the side-by-side
+    comparison PDF (cmd_compare) is built first, on the same plan."""
     import pikepdf
 
     if not upscaled_dir.is_dir() or not image_files(upscaled_dir):
@@ -1524,6 +1529,10 @@ def cmd_merge(pdf_dir: Path, out_path: Path, upscaled_dir: Path) -> int:
     for wmsg in warnings:
         print(f"  WARNING: {wmsg}")
 
+    if comic_dir is not None:
+        cmd_compare(pdf_dir, compare_path(out_path), upscaled_dir, comic_dir,
+                    plan=plan)
+
     geo = template_geometry()
     cw, ch = geo["canvas"]
     res = geo.get("res", 300.0)
@@ -1539,6 +1548,100 @@ def cmd_merge(pdf_dir: Path, out_path: Path, upscaled_dir: Path) -> int:
     blanks = sum(1 for e in plan if e is None)
     print(f"MERGED {len(plan) - blanks} pages + {blanks} white pages "
           f"-> {out_path} ({len(plan)} total)")
+    return 0
+
+
+COMPARE_GAP = 18  # pt of white between the original and the final page
+
+
+def compare_path(merged: Path) -> Path:
+    """The comparison PDF sits next to the book PDF."""
+    return merged.with_name(merged.stem + " - comparison.pdf")
+
+
+def original_xobject(pdf, src: Path):
+    """The source image as an image XObject, AS IS: a JPEG goes in byte for
+    byte (no re-encoding), anything else losslessly (Flate), transparency
+    flattened on white."""
+    import zlib
+    import pikepdf
+
+    with Image.open(src) as im:
+        w, h = im.size
+        if im.format == "JPEG" and im.mode in ("RGB", "L"):
+            data, filt, mode = src.read_bytes(), pikepdf.Name.DCTDecode, im.mode
+        else:
+            if im.mode in ("RGBA", "LA", "PA") or "transparency" in im.info:
+                flat = Image.new("RGBA", im.size, "white")
+                flat.alpha_composite(im.convert("RGBA"))
+                im = flat
+            mode = "L" if im.mode in ("1", "L") else "RGB"
+            data = zlib.compress(im.convert(mode).tobytes())
+            filt = pikepdf.Name.FlateDecode
+    space = pikepdf.Name.DeviceGray if mode == "L" else pikepdf.Name.DeviceRGB
+    return pikepdf.Stream(pdf, data, Type=pikepdf.Name.XObject,
+                          Subtype=pikepdf.Name.Image, Width=w, Height=h,
+                          ColorSpace=space, BitsPerComponent=8, Filter=filt)
+
+
+def cmd_compare(pdf_dir: Path, out_path: Path, upscaled_dir: Path,
+                comic_dir: Path, plan: list = None) -> int:
+    """Side-by-side proof of the whole book: comparison page N = book page N,
+    with the ORIGINAL source image as is (scaled to the page height) on the
+    left and the final page PDF, embedded unchanged, on the right. A spread
+    half shows the whole source spread; the book's white pages stay white,
+    so the page numbers of the two PDFs agree."""
+    import pikepdf
+
+    if plan is None:
+        if not upscaled_dir.is_dir() or not image_files(upscaled_dir):
+            print(f"No upscaled images in {upscaled_dir} — run 'just upscale' "
+                  "first.")
+            return 1
+        print("Classifying pages...")
+        _, _, plan, _ = book_plan(upscaled_dir)
+    missing = [e.stem for e in plan
+               if e is not None and not (pdf_dir / (e.stem + ".pdf")).is_file()]
+    if missing:
+        print(f"Missing page PDFs ({len(missing)}) — run 'just compose' first: "
+              + ", ".join(missing[:5]))
+        return 1
+
+    geo = template_geometry()
+    cw, ch = geo["canvas"]
+    res = geo.get("res", 300.0)
+    blank_size = (cw * 72 / res, ch * 72 / res)
+    out = pikepdf.new()
+    no_source = []
+    for entry in plan:
+        if entry is None:
+            out.add_blank_page(page_size=blank_size)
+            continue
+        with pikepdf.open(pdf_dir / (entry.stem + ".pdf")) as src_pdf:
+            final = src_pdf.pages[0]
+            x0, y0, x1, y1 = [float(v) for v in final.mediabox]
+            fw, fh = x1 - x0, y1 - y0
+            src = source_of(entry, comic_dir)
+            if src is None:
+                no_source.append(entry.stem)
+                ow = fw
+            else:
+                orig = original_xobject(out, src)
+                ow = fh * int(orig.Width) / int(orig.Height)
+            page = out.add_blank_page(page_size=(ow + COMPARE_GAP + fw, fh))
+            if src is not None:
+                name = page.add_resource(orig, pikepdf.Name.XObject,
+                                         prefix="Orig")
+                page.contents_add(pikepdf.Stream(
+                    out, f"q {ow:.4f} 0 0 {fh:.4f} 0 0 cm {name} Do Q"
+                    .encode()))
+            left = ow + COMPARE_GAP
+            page.add_overlay(final, pikepdf.Rectangle(left, 0, left + fw, fh))
+    out.save(out_path)
+    if no_source:
+        print(f"  WARNING: no source image for {len(no_source)} pages (left "
+              "blank): " + ", ".join(no_source[:5]))
+    print(f"COMPARISON {len(plan)} pages (original | final) -> {out_path}")
     return 0
 
 
@@ -2029,7 +2132,7 @@ def cmd_reletter_book(comic_dir: Path, upscaled_dir: Path, xcf_dir: Path,
             return 1
 
     step("merge")
-    rc = cmd_merge(pdf_dir, merged, upscaled_dir)
+    rc = cmd_merge(pdf_dir, merged, upscaled_dir, comic_dir)
     if rc != 0:
         return rc
 
@@ -2049,7 +2152,8 @@ def main() -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("comic", help="comic folder (name inside this repo, or a path)")
     ap.add_argument("step", nargs="?", default="all",
-                    choices=["scan", "upscale", "compose", "merge", "all"])
+                    choices=["scan", "upscale", "compose", "merge", "compare",
+                             "all"])
     ap.add_argument("--engine", default="realesrgan",
                     choices=["realesrgan", "iloveimg"],
                     help="upscaler: local Real-ESRGAN (default, keeps comic "
@@ -2097,11 +2201,14 @@ def main() -> int:
             return rc
     merged = REPO / "pdf" / f"{name}.pdf"
     if args.step == "merge":
-        return cmd_merge(pdf_dir, merged, upscaled_dir)
+        return cmd_merge(pdf_dir, merged, upscaled_dir, comic_dir)
+    if args.step == "compare":
+        return cmd_compare(pdf_dir, compare_path(merged), upscaled_dir,
+                           comic_dir)
     rc = cmd_compose(upscaled_dir, xcf_dir, pdf_dir, comic_dir)
     if rc != 0 or args.step == "compose":
         return rc
-    return cmd_merge(pdf_dir, merged, upscaled_dir)
+    return cmd_merge(pdf_dir, merged, upscaled_dir, comic_dir)
 
 
 if __name__ == "__main__":

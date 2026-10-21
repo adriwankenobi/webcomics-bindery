@@ -96,7 +96,13 @@ session needs:
   tools/realesrgan/realesrgan-ncnn-vulkan + models/ (install steps in
   README "Setup"). Pass `-m <models dir>` by hand or it exits 1 silently.
 - Re-lettering: `.venv-reletter/bin/python` (opencv-python-headless, pillow,
-  numpy, fonttools). cv2 is ONLY here.
+  numpy, fonttools). cv2 is ONLY here (and in .venv-untext).
+- Text removal (`just untext <image>`, standalone untext.py):
+  `.venv-untext` from `just setup-untext` — torch 2.2.2 (last Intel-Mac
+  wheels, needs numpy<2), easyocr, cv2; LaMa + CRAFT models untracked in
+  tools/lama/, tools/easyocr/. Writes `-untexted` + `-untexted-mask.png`
+  BESIDE the input (user ruling) — never run it on a comic source folder's
+  image: every image there is a page. Its tests skip under .venv.
 - GIMP batch = GIMP 2.10 python-fu = **Python 2**: no f-strings, encode
   UTF-8 before pdb text calls. `gimp` is not on PATH — use
   /Applications/GIMP-2.10.app/Contents/MacOS/gimp.

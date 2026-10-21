@@ -104,7 +104,14 @@ fonttools). GIMP batch scripts run under GIMP 2.10's python-fu =
    on source pages exactly.
 3. **merge** — concatenates the page PDFs, inserting white pages so covers
    land on the right, index/credits pages on the left, and spread halves on
-   facing pages.
+   facing pages. Just before, on the same plan, `cmd_compare` writes
+   `pdf/<comic> - comparison.pdf` (also `just compare`): comparison page N
+   = book page N, the SOURCE image as is on the left (scaled to the page
+   height; a JPEG is embedded byte for byte, anything else losslessly on
+   white; a spread half shows the whole spread) and the final page PDF
+   embedded unchanged on the right; the book's white pages stay white so
+   page numbers agree between the two PDFs. Rebuilt every run (seconds per
+   hundred pages: nothing is re-encoded).
 
 ### Re-lettered book driver (`--relettering`)
 
@@ -129,7 +136,7 @@ on disk, so the same command resumes after the pause or after a failure.
 | compose | existing mtime rule | cleaned pages are newer → recomposed |
 | GIMP text pass | per page: `qa/<stem>.png` mtime ≥ `.xcf` mtime | see Stage 4 |
 | postprocess | — | only the stems the pass reported `RELETTER DONE`, so no PDF is recompressed twice |
-| merge | — | |
+| merge | — | writes the comparison PDF first |
 | qa_scan | — | report only |
 
 ## Re-lettering subsystem (`relettering/`)
@@ -588,6 +595,67 @@ whenever the cleaning changes, and gate it with the faint-residue scan.
    the entries of already-approved pages afterwards — detection/fit
    improvements can silently change (or regress) pages the reviewer signed
    off; restore their entries verbatim if placement moved.
+
+## Text removal (`untext.py`)
+
+Standalone: it removes the text from one image and touches nothing else in
+the repo. Runs in `.venv-untext`; models are untracked in `tools/`.
+
+1. **Find the blocks** — CRAFT (EasyOCR's detector, recognition off) gives
+   one box per text block in any script. The page's own `letter_mask` is not
+   reused: it is tuned to comic lettering inside balloons, not to logos and
+   display type on painted art. CRAFT also fires on ARTWORK — face
+   markings, a sword hilt — and those come back as boxes TALLER than wide,
+   which a line of horizontal text never is: they are skipped. (EasyOCR's
+   recognition confidence cannot stand in: a stylised logo scores lower than
+   a face.) Artwork in a wide box gets through that test, so the letters
+   found in a block must also LOOK PRINTED (`printed`): flat colour (median
+   spread inside the letters' core <= INK_FLAT) and set off strongly from
+   the ground (>= MIN_CONTRAST). Measured: display lettering 0-6 spread and
+   >= ~200 contrast; painted markings, a hilt, rocks >= 11 spread, or
+   <= ~100 contrast. Signatures (thin ink, low contrast) fall on the
+   artwork side and are kept whole — never half-erased.
+2. **Find the letters in a block** — the letters are what the box's BORDER
+   is not: distance from the border's median colour, Otsu-split, so light on
+   dark and dark on light need no polarity guess (CRAFT boxes sit tight on
+   the glyphs, hence a pad first: the border must be ground). A piece counts
+   only when its colour is a BLEND of the ground and the letters' colour
+   (along the ground->ink line, close to it). A plain colour distance cannot
+   tell an anti-aliased registered-mark (a white/sky blend, far from white)
+   from artwork such as a grey rock beside olive letters (nearer to the ink
+   than the mark is); off-line distance separates them by a wide margin. Thin
+   marks (under 2% of the block's largest piece) are taken as their whole
+   bbox: their counters are ground and would stay standing.
+   A BORDER THAT IS ART (`outlined_letters`, when the border strays a median
+   > BUSY_RING from its own median) has no ground to measure against: a
+   title set straight on the artwork, read by an outline of its own. Against
+   that border's median the art's whites and blacks are further off than the
+   letters, Otsu takes the art, `printed` refuses it and the title stays
+   standing; striped art alone, on the other hand, passes as lettering. There
+   the letters are the flat colour (k-means) holding >= MIN_SHARE of the box
+   and none of its border, and the PROOF is a flat outline all round them —
+   walked out in distance bands while most of each band is the outline's
+   colour; the outline goes in the mask (it is lettering). Artwork's flat
+   patches have no outline and come back empty.
+3. **Grow by the halo** — display type carries a drop shadow or glow, and a
+   mask that leaves it behind makes the inpainter rebuild the letters as dark
+   GHOSTS (it continues the dark ring inward). No fixed margin fits both a
+   shadowed logo and a bare title, so each block walks out from its letters
+   (distance bands) until the luminance profile stays flat, and grows that
+   far. "Flat", not "back to the far ground level": painted art keeps
+   changing brightness with distance and the far level never comes back.
+   The walk also stops where the profile TURNS BACK: a halo fades one way
+   only, while busy art round the letters rises and falls and is rarely
+   flat for long, so without the turn the walk runs tens of px into the
+   art and the inpainter blurs a whole face.
+4. **Fill** — LaMa (big-lama TorchScript, CPU), then ONLY the masked pixels
+   are pasted back. Images up to 1600px go whole (most context); larger ones
+   per group of nearby blocks, each with a margin of context. Pixel constants
+   are tuned at a 1300px long side and scale with the image.
+
+The mask PNG is the hand-off point: reused when present, so a hand fix in
+GIMP survives re-runs; deleting it is the only way to detect again (there
+is deliberately no flag that throws a hand-fixed mask away).
 
 ## Footguns
 

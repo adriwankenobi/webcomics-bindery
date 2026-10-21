@@ -8,6 +8,7 @@
 !/README.md
 !/justfile
 !/process.py
+!/untext.py
 !/tests/
 !/template.xcf
 !/template_geometry.json

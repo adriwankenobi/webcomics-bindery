@@ -28,14 +28,31 @@ upscale-iloveimg comic:
 compose comic:
     {{python}} process.py "{{comic}}" compose
 
-# combine all page PDFs into pdf/<comic>.pdf
+# combine all page PDFs into pdf/<comic>.pdf (builds the comparison PDF first)
 merge comic:
     {{python}} process.py "{{comic}}" merge
+
+# original | final side by side, one page per book page -> pdf/<comic> - comparison.pdf
+compare comic:
+    {{python}} process.py "{{comic}}" compare
 
 # full pipeline: upscale + compose + merge; --relettering = re-lettered book (pauses for the transcription, resumes when filled)
 process comic *flags:
     {{python}} process.py "{{comic}}" all {{flags}}
 
-# unit tests for the pipeline glue (tests/)
+# torch 2.2.2 = the last release with Intel-Mac wheels; it needs numpy 1.x
+# one-time setup for `just untext`: .venv-untext + the LaMa and CRAFT models in tools/
+setup-untext:
+    [ -x .venv-untext/bin/python ] || uv venv --python 3.12 .venv-untext
+    uv pip install --python .venv-untext/bin/python "torch==2.2.2" "torchvision==0.17.2" "numpy<2" pillow "opencv-python-headless<4.11" easyocr
+    .venv-untext/bin/python untext.py --setup
+
+# remove the text from ONE image -> <name>-untexted + <name>-untexted-mask.png beside it (an edited mask is reused; delete it to detect again)
+[no-cd]
+untext image:
+    "{{justfile_directory()}}/.venv-untext/bin/python" "{{justfile_directory()}}/untext.py" "{{image}}"
+
+# unit tests for the pipeline glue (tests/; untext's run in .venv-untext once it exists)
 test:
     {{python}} -m unittest discover tests
+    if [ -x .venv-untext/bin/python ]; then .venv-untext/bin/python -m unittest tests.test_untext; fi

@@ -25,6 +25,8 @@ upscaled/<comic>/            pages at exact placement size (Real-ESRGAN);
 xcf/<comic>/                 one .xcf per page (template + page + text layers)
 pdf/<comic>/                 one .pdf per page
 pdf/<comic>.pdf              merged book
+pdf/<comic> - comparison.pdf original | final side by side, page N =
+                             book page N
 relettering/<comic>/         re-lettering workdir (bubbles, sheets, parts,
                              transcripts, layout, pristine copies, QA)
 template.xcf                 print template (6.25x9.25" @300dpi incl. bleed)
@@ -88,6 +90,11 @@ cp gimp-plugin/webcomics_compose.py "$D"/ && chmod +x "$D"/webcomics_compose.py
 **4. Comic font** — user-supplied and licensed; follow
 `relettering/fonts/README.md` (needed only for the re-lettering stage).
 
+**5. Text removal (optional)** — `just setup-untext` creates `.venv-untext`
+(PyTorch, EasyOCR, OpenCV) and downloads the LaMa inpainting model to
+`tools/lama/` and the CRAFT text detector to `tools/easyocr/` (~1GB in all,
+untracked). Needed only for `just untext`.
+
 ## Base pipeline (`process.py`, via `justfile`)
 
 ```
@@ -98,6 +105,7 @@ just process "<comic>" --relettering
                              pauses for the transcription, resumes when
                              it is filled (see "One command")
 just upscale|compose|merge   individual steps (resumable)
+just compare "<comic>"       rebuild only the comparison PDF
 just test                    unit tests for the pipeline glue (tests/)
 ```
 
@@ -108,7 +116,9 @@ just test                    unit tests for the pipeline glue (tests/)
   `template.xcf`, draws page numbers, exports PDFs
   (then recompressed + sRGB-tagged by `postprocess_pdf`).
 - **merge**: concatenates page PDFs, inserting blanks so covers land right,
-  index pages left, and spread halves on facing pages.
+  index pages left, and spread halves on facing pages. First it writes
+  `pdf/<comic> - comparison.pdf`: each book page beside its original source
+  image, as is, for proofing.
 
 ## Re-lettering stage (between upscale and compose)
 
@@ -250,3 +260,26 @@ pass with `layout.json` temporarily pruned to the affected stems →
 - Render pages at 300 dpi and overlay 1:1 on the source (the composed page
   is centered on the 1875×2775 canvas) — compare placement and size
   against the original lettering, which is the gold standard.
+
+## Removing the text from one image (`just untext`)
+
+A standalone tool, outside the book pipeline — e.g. a cover whose logo and
+title have to go before the art is reused:
+
+```
+just untext "path/to/image.jpg"   # -> image-untexted.jpg + image-untexted-mask.png
+```
+
+- One image file per run; the path is relative to where you run it. The
+  input is never modified; both outputs land **beside the input**, so do not
+  point it at an image inside a comic source folder — every image there is a
+  book page, and the outputs would become pages too.
+- The mask PNG (white = remove) is **reused** on the next run: if the
+  detection missed something or took too much (it can take artwork for
+  text), paint the mask in GIMP and run the same command again. Delete the
+  mask to have it detected afresh. An image with no text found gets an empty
+  mask to paint and no output image.
+- Only the masked pixels change; the rest is the input's own pixels (a JPEG
+  is re-saved at quality 100, 4:4:4; PNG/WebP losslessly; transparency,
+  ICC profile and dpi are kept).
+- CPU only: ~30s for a 900x1300 image, ~1.5min at 1800x2500.
