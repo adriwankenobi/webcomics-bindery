@@ -191,6 +191,20 @@ class ApplyBook(unittest.TestCase):
         self.assertAlmostEqual(got["6.02"][0], 1.0, places=6)
 
 
+@unittest.skipUnless(HAVE_CV2, "cv2 only in .venv-reletter")
+class IssueCaps(unittest.TestCase):
+    def test_median_cap_in_printed_mm(self):
+        D, _ = load()
+        ps = [{"stem": "S 6.01 002", "oldh": 15.0},
+              {"stem": "S 6.01 003", "oldh": 15.0},
+              {"stem": "S 6.01 003", "oldh": 30.0},
+              {"stem": "S 6.02 002", "oldh": 30.0}]
+        got = D.issue_caps_mm(ps, 300.0)
+        self.assertEqual(sorted(got), ["6.01", "6.02"])
+        self.assertAlmostEqual(got["6.01"], 1.27, places=3)   # 15px @300
+        self.assertAlmostEqual(got["6.02"], 2.54, places=3)
+
+
 def shear(crop, k):
     """Lean a glyph right by k (x shifts k px per px of height, top most)."""
     h, w = crop.shape

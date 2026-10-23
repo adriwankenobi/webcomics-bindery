@@ -5,13 +5,17 @@ issue_decisions.json once (the rule and the files: issue_plan.py).
 
 Two gates, both read off the original's letter blobs, so no transcript is
 needed:
-  * SIZE — the words are unknown, but their SHAPE is not: the blobs give
-    the lines, the word breaks and roughly how many letters each word has.
-    Placeholder text of that shape goes through OUR REAL FIT (the same
-    prepare_bubble, row profiles, tracking and hyphenation), so our font's
-    width and the balloon's shape are counted exactly as the fit will.
+  * SIZE — the original's dialogue cap height as it PRINTS: pages are
+    placed 1:1 on the template, so its pixels convert to mm at the
+    template's resolution.
   * FONT — letter-shape statistics (width, stroke, slant, lowercase)
     against the same statistics of our font rendered at the same height.
+Reported beside them, deciding nothing: how much taller OUR letters would
+come out. The words are unknown, but their SHAPE is not: the blobs give
+the lines, the word breaks and roughly how many letters each word has.
+Placeholder text of that shape goes through OUR REAL FIT (the same
+prepare_bubble, row profiles, tracking and hyphenation), so our font's
+width and the balloon's shape are counted exactly as the fit will.
 
     reletter_decide.py "<comic folder name>"
 """
@@ -173,6 +177,27 @@ def page_texts(img, bubbles):
 
 
 # ---- the size gate ---------------------------------------------------------
+
+MM_PER_IN = 25.4
+
+
+def print_res():
+    """Pixels per inch the pages print at (placed 1:1 on the template):
+    the compose step's cached template geometry."""
+    geo = json.loads((F.REPO / "template_geometry.json").read_text())
+    return float(geo.get("res", 300.0))
+
+
+def issue_caps_mm(ps, res):
+    """{issue: median ORIGINAL dialogue cap height, in printed mm}."""
+    caps = defaultdict(list)
+    for p in ps:
+        caps[issue_of(p["stem"])].append(p["oldh"])
+    return {issue: round(float(np.median(hs)) * MM_PER_IN / res, 3)
+            for issue, hs in caps.items()}
+
+
+# ---- our predicted size (reported, not decisive) ---------------------------
 
 def search_cap(F, fit, p):
     """Where a balloon's size search starts. The real fit searches from
@@ -457,6 +482,7 @@ def assess(pages_dir, detail=None):
                   f"{el / 60:.0f} min elapsed, "
                   f"~{el / n * (len(paths) - n) / 60:.0f} min left",
                   flush=True)
+    caps = issue_caps_mm(ps, print_res())
     rows, book = size_entries(F, fit, ps, progress=True)
     ratios = apply_book(rows, fit, book)
     if detail is not None:
@@ -466,9 +492,10 @@ def assess(pages_dir, detail=None):
         rs = ratios.get(issue)
         ratio = round(float(np.median(rs)), 3) if rs else None
         font = issue_font(deltas[issue])
-        rec = decide_issue(font, ratio, entries[issue])
+        rec = decide_issue(font, caps.get(issue), entries[issue])
         rec.update({
-            "font": font, "size_ratio": ratio,
+            "font": font, "orig_cap_mm": caps.get(issue),
+            "size_ratio": ratio,
             "balloons": sum(1 for r in rows if issue_of(r["stem"]) == issue),
             "font_balloons": len(deltas[issue]),
             "font_delta": ({k: round(v, 3) for k, v in

@@ -1,8 +1,10 @@
 """Check the keep-or-re-letter measurements against a comic that was
-already fitted: the PREDICTED size ratio per issue (placeholder text
-through the real fit) against the ACTUAL one in its layout.json, the
-verdict each gives, the font gate's verdict and statistics, and how well
-the placeholder's word counts match the transcripts.
+already fitted: the original's printed cap height per issue measured from
+the blobs against the one the fit measured (layout.json old_cap_h), the
+verdict each gives; the PREDICTED size ratio (placeholder text through
+the real fit) against the ACTUAL one; the font gate's verdict and
+statistics, and how well the placeholder's word counts match the
+transcripts.
 
 READ-ONLY on the comic: results go to $SP/decide/<comic>.json only.
 
@@ -37,8 +39,9 @@ OUT.mkdir(parents=True, exist_ok=True)
 
 
 def actual_ratios(fit):
+    """-> ({issue: [new/old cap ratios]}, {issue: [old cap heights px]})."""
     layout = json.loads((F.WORK / "layout.json").read_text())
-    out = defaultdict(list)
+    out, olds = defaultdict(list), defaultdict(list)
     for stem, entries in layout.items():
         for e in entries:
             if e.get("kind") != "bubble" or not e.get("old_cap_h"):
@@ -46,7 +49,8 @@ def actual_ratios(fit):
             sizes = [ln.get("font_px", e["font_px"]) for ln in e["lines"]]
             out[issue_of(stem)].append(
                 fit.cap_height(min(sizes or [e["font_px"]])) / e["old_cap_h"])
-    return out
+            olds[issue_of(stem)].append(e["old_cap_h"])
+    return out, olds
 
 
 def word_agreement():
@@ -71,7 +75,8 @@ def main():
     fit = F.Fitter()
     detail = {}
     pred = D.assess(F.WORK / "pristine", detail)
-    act = actual_ratios(fit)
+    act, olds = actual_ratios(fit)
+    res_px = D.print_res()
     # the book the real fit used (most dialogue sits at it), to tell an
     # error in the ESTIMATED book from an error per balloon
     from collections import Counter
@@ -84,10 +89,15 @@ def main():
         a = act.get(issue)
         a_med = round(float(np.median(a)), 3) if a else None
         n = rec["balloons"] or len(a or [])
-        size_pred = decide_issue("similar", rec["size_ratio"], n)
-        size_act = decide_issue("similar", a_med, n)
+        o = olds.get(issue)
+        cap_act = (round(float(np.median(o)) * D.MM_PER_IN / res_px, 3)
+                   if o else None)
+        size_pred = decide_issue("similar", rec["orig_cap_mm"], n)
+        size_act = decide_issue("similar", cap_act, n)
         rows.append({
-            "issue": issue, "pred": rec["size_ratio"], "actual": a_med,
+            "issue": issue, "cap_mm": rec["orig_cap_mm"],
+            "cap_mm_actual": cap_act,
+            "pred": rec["size_ratio"], "actual": a_med,
             "pred_real_book": (round(float(np.median(with_real[issue])), 3)
                                if with_real.get(issue) else None),
             "err": (round(rec["size_ratio"] - a_med, 3)
@@ -113,12 +123,14 @@ def main():
     print(f"our font @cap20: {ref}")
     print(f"book size: estimated {detail['book']}px, the real fit's "
           f"{real_book}px")
-    print(f"{'issue':<10}{'pred':>7}{'@book':>7}{'actual':>8}{'err':>7}  size(pred/act)"
+    print(f"{'issue':<10}{'mm':>6}{'mm act':>7}{'pred':>7}{'@book':>7}"
+          f"{'actual':>8}{'err':>7}  size(pred/act)"
           f"   font     n   median delta to our font")
     for r in rows:
         flag = "" if (r["size_pred"] == r["size_actual"]
                       or r["size_pred_unsure"]) else "  << MISMATCH"
-        print(f"{r['issue']:<10}{r['pred'] or 0:>7.3f}"
+        print(f"{r['issue']:<10}{r['cap_mm'] or 0:>6.2f}"
+              f"{r['cap_mm_actual'] or 0:>7.2f}{r['pred'] or 0:>7.3f}"
               f"{r['pred_real_book'] or 0:>7.3f}{r['actual'] or 0:>8.3f}"
               f"{r['err'] if r['err'] is not None else 0:>7.3f}  "
               f"{r['size_pred']:>8}/{r['size_actual']:<8} {r['font']:<9}"

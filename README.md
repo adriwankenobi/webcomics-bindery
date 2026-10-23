@@ -147,19 +147,21 @@ Press Enter when done  (Ctrl-C to stop; re-run the same command to resume)
 
 Before the sheets are made, the run decides **per issue** whether to
 re-letter at all (`reletter_decide.py`). The book is printed, so
-re-lettering is only worth it where it makes the letters bigger: an issue
-keeps its original lettering when its font is like ours AND our letters
-would come out less than ~10% taller (predicted by running the real fit on
-placeholder text shaped like the original's lines and words). A kept issue
+re-lettering is only worth it where the original prints too small: an
+issue keeps its original lettering when its font is like ours AND its
+dialogue capitals print at least 1.25 mm tall (measured on the page as it
+is placed on the template). How much taller our letters would come out
+(predicted by running the real fit on placeholder text shaped like the
+original's lines and words) is reported beside each verdict. A kept issue
 gets no sheets, so it is never transcribed, cleaned or typeset — its pages
 compose as they came out of the upscaler. Either gate saying re-letter
 wins, and an issue the measurement is unsure about is re-lettered and
 listed at the end of the run:
 
 ```
-keep original lettering (20): 6.01 (x1.00, font similar), ...
-re-letter (9): 6.15 (x1.14, font similar), ...
-unsure (decided re-letter, 3): 6.04 (x1.08, font similar): ...
+keep original lettering (20): 6.01 (1.52mm, ours x1.00, font similar), ...
+re-letter (9): 7.01 (1.10mm, ours x1.31, font similar), ...
+unsure (decided re-letter, 1): 6.04 (1.30mm, ours x1.08, font unsure): ...
 to change one, edit relettering/<comic>/issue_overrides.json ({"<issue>": "keep" | "reletter"}); ...
 ```
 

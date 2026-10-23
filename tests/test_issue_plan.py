@@ -22,23 +22,22 @@ def write_json(path: Path, data) -> None:
 
 class DecideIssue(unittest.TestCase):
     CASES = [
-        # font, ratio, entries -> decision, unsure
-        ("similar", 1.00, 50, "keep", False),
-        ("similar", 1.06, 50, "keep", False),
-        ("similar", 1.07, 50, "reletter", True),
-        ("similar", 1.12, 50, "reletter", True),
-        ("similar", 1.13, 50, "reletter", False),
-        ("different", 0.99, 50, "reletter", False),
-        ("unsure", 1.00, 50, "reletter", True),
+        # font, original cap mm, entries -> decision, unsure
+        ("similar", 1.52, 50, "keep", False),
+        ("similar", 1.25, 50, "keep", False),
+        ("similar", 1.249, 50, "reletter", False),
+        ("similar", 1.10, 50, "reletter", False),
+        ("different", 1.60, 50, "reletter", False),
+        ("unsure", 1.60, 50, "reletter", True),
         ("similar", None, 5, "reletter", True),
         ("similar", None, 0, "keep", False),
     ]
 
     def test_rule(self):
-        for font, ratio, n, decision, unsure in self.CASES:
-            got = issue_plan.decide_issue(font, ratio, n)
+        for font, cap, n, decision, unsure in self.CASES:
+            got = issue_plan.decide_issue(font, cap, n)
             self.assertEqual((got["decision"], got["unsure"]),
-                             (decision, unsure), (font, ratio, n))
+                             (decision, unsure), (font, cap, n))
             self.assertTrue(got["reason"])
 
 
@@ -113,7 +112,8 @@ class ReportLines(unittest.TestCase):
             "6.01": {"decision": "keep", "unsure": False, "reason": "r",
                      "font": "similar", "size_ratio": 1.0, "balloons": 9},
             "6.04": {"decision": "reletter", "unsure": True, "reason": "r",
-                     "font": "similar", "size_ratio": 1.08, "balloons": 9},
+                     "font": "unsure", "orig_cap_mm": 1.3,
+                     "size_ratio": 1.08, "balloons": 9},
             "6.28": {"decision": "reletter", "unsure": False, "reason": "r",
                      "font": "similar", "size_ratio": 1.2, "balloons": 9},
         })
@@ -128,6 +128,8 @@ class ReportLines(unittest.TestCase):
                             for ln in lines), lines)
         self.assertTrue(any("issue_overrides.json" in ln for ln in lines))
         self.assertTrue(any("6.01" in ln and "(override)" in ln
+                            for ln in lines), lines)
+        self.assertTrue(any("6.04 (1.30mm, ours x1.08, font unsure)" in ln
                             for ln in lines), lines)
 
 

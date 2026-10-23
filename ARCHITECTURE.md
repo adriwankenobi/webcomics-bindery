@@ -232,16 +232,26 @@ note). Covers, index/credits and art pages are skipped (`is_story_page`).
 
 ### Stage 1.5 — keep or re-letter (`reletter_decide.py`, `issue_plan.py`)
 
-The book is printed: re-lettering exists to make the letters bigger. Some
-letterers already filled their balloons with a hand much like ours, and
-there re-lettering buys nothing (our font is wider per unit of cap height,
-so a full balloon can even come out SMALLER) and costs a transcription.
+The book is printed: re-lettering exists to make small letters bigger.
+Some letterers already set a hand much like ours at a size that reads well
+on paper, and there re-lettering buys nothing visible (the fit is held down
+by the balloons, so our type comes out only a fraction of a mm taller, or
+even SMALLER: our font is wider per unit of cap height) and costs a font
+swap and a transcription.
 So, per ISSUE (`make_sheets.issue_of` — the issue part of the transcript
 key; one issue = one letterer, so all of its pages or none), before the
 sheets:
 
-- **Size gate.** The words are unknown before transcription, their SHAPE
-  is not: the letter blobs (`block_letters` in each block) give the lines,
+- **Size gate.** The original's PRINTED cap height: the median
+  `oldh` of the issue's dialogue balloons (`issue_caps_mm`), converted to
+  mm at the template's resolution (`print_res`, from
+  template_geometry.json — pages are placed 1:1). An absolute size, not
+  our gain over it: whether type is too small is a property of the
+  paper, and a ratio cannot tell a small original we can lift from a
+  comfortable one we would only nudge.
+- **Predicted ratio (reported, decides nothing).** How much taller OUR
+  letters would come out — the number to read beside the verdict. The
+  words are unknown before transcription, their SHAPE is not: the letter blobs (`block_letters` in each block) give the lines,
   the word breaks (a gap wider than `WORD_GAP` x the cap height) and the
   letters per word (blob width / the page's median letter width — touching
   letters merge). Placeholder text of that shape (cycled alphabet, no
@@ -272,9 +282,9 @@ sheets:
   does. Fewer than `FONT_MIN_BALLOONS`
   measurable balloons = unsure.
 - **Rule** (`issue_plan.decide_issue`): keep only when the font is similar
-  AND the ratio is below `SIZE_BAR - UNSURE_MARGIN` (1.10 - 0.03). Either
-  gate saying re-letter wins; unsure (font unsure, ratio within the margin
-  of the bar) re-letters and is listed.
+  AND the original's printed cap height is at least `MIN_CAP_MM` (1.25).
+  Either gate saying re-letter wins; unsure (font unsure, or no measurable
+  dialogue balloon) re-letters and is listed.
 
 `issue_decisions.json` is written once and never recomputed — like
 detection, a re-run must not move an issue that was transcribed or

@@ -1,7 +1,7 @@
 """Keep the original lettering or re-letter it — the per-ISSUE decision.
 
-The book is printed, so re-lettering is only worth it where it makes the
-letters bigger, in a font like ours. Every issue may have had its own
+The book is printed, so re-lettering is only worth it where the original
+prints too small, in a font like ours. Every issue may have had its own
 letterer, so the call is all of an issue's pages or none. It is made after
 detection and BEFORE transcription, so a kept issue is never transcribed.
 
@@ -18,41 +18,40 @@ from pathlib import Path
 
 from make_sheets import issue_of
 
-SIZE_BAR = 1.10       # re-letter when ours is at least 10% taller
-UNSURE_MARGIN = 0.03  # either side of the bar: re-letter, but list it
+# Re-letter when the original's dialogue capitals PRINT shorter than this.
+# An absolute size, not our gain over the original: the fit is held down by
+# the balloons, so above it our type comes out only a fraction of a mm
+# taller (invisible on paper) at the price of a font swap; below it,
+# lifting the type to the book's size is a gain a reader sees.
+MIN_CAP_MM = 1.25
 DECISIONS = "issue_decisions.json"
 OVERRIDES = "issue_overrides.json"
 CHOICES = ("keep", "reletter")
 
 
-def decide_issue(font: str, ratio, n_entries: int) -> dict:
-    """The rule. `font`: "similar" | "different" | "unsure"; `ratio`: the
-    issue's median predicted new/old cap height over its dialogue balloons
-    (None when there is none to measure); `n_entries`: every detected entry
-    on the issue's pages. Either gate saying re-letter wins, and an unsure
-    gate re-letters (the user decides from the list at the end)."""
-    # rounded: 1.10 + 0.03 is 1.1300000000000001 in floating point
-    lo = round(SIZE_BAR - UNSURE_MARGIN, 6)
-    hi = round(SIZE_BAR + UNSURE_MARGIN, 6)
-    r = f"x{ratio:.2f}" if ratio is not None else "no ratio"
+def decide_issue(font: str, cap_mm, n_entries: int) -> dict:
+    """The rule. `font`: "similar" | "different" | "unsure"; `cap_mm`: the
+    issue's median printed cap height of the ORIGINAL's dialogue balloons,
+    in mm (None when there is none to measure); `n_entries`: every detected
+    entry on the issue's pages. Either gate saying re-letter wins, and an
+    unsure gate re-letters (the user decides from the list at the end)."""
+    c = f"original {cap_mm:.2f}mm" if cap_mm is not None else "no cap height"
 
     def out(decision, unsure, reason):
         return {"decision": decision, "unsure": unsure, "reason": reason}
     if n_entries == 0:
         return out("keep", False, "no lettering detected")
     if font == "different":
-        return out("reletter", False, f"font different ({r})")
-    if ratio is None:
+        return out("reletter", False, f"font different ({c})")
+    if cap_mm is None:
         return out("reletter", True,
                    f"font {font}, no measurable dialogue balloon")
     if font == "unsure":
-        return out("reletter", True, f"font unsure, ours {r}")
-    if ratio >= hi:
-        return out("reletter", False, f"font similar, ours {r} (>= x{hi:.2f})")
-    if ratio >= lo:
-        return out("reletter", True,
-                   f"font similar, ours {r} (near the x{SIZE_BAR:.2f} bar)")
-    return out("keep", False, f"font similar, ours {r} (< x{lo:.2f})")
+        return out("reletter", True, f"font unsure, {c}")
+    if cap_mm < MIN_CAP_MM:
+        return out("reletter", False,
+                   f"font similar, {c} (< {MIN_CAP_MM:.2f}mm)")
+    return out("keep", False, f"font similar, {c} (>= {MIN_CAP_MM:.2f}mm)")
 
 
 def _load(path: Path):
@@ -108,10 +107,12 @@ def report_lines(work: Path) -> list:
 
     def item(issue):
         d = decisions[issue]
-        r = d.get("size_ratio")
-        txt = (f"{issue} (x{r:.2f}, font {d.get('font')})" if r is not None
-               else f"{issue} (font {d.get('font')})")
-        return txt + (" (override)" if issue in overrides else "")
+        cap, r = d.get("orig_cap_mm"), d.get("size_ratio")
+        facts = ([f"{cap:.2f}mm"] if cap is not None else []) \
+            + ([f"ours x{r:.2f}"] if r is not None else []) \
+            + [f"font {d.get('font')}"]
+        return (f"{issue} ({', '.join(facts)})"
+                + (" (override)" if issue in overrides else ""))
     keep = [i for i in sorted(decisions) if plan[i] == "keep"]
     relet = [i for i in sorted(decisions) if plan[i] == "reletter"]
     unsure = [i for i in relet
