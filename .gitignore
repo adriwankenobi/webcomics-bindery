@@ -5,6 +5,7 @@
 !/.gitignore
 !/ARCHITECTURE.md
 !/CLAUDE.md
+!/GOTCHAS.md
 !/README.md
 !/justfile
 !/process.py
