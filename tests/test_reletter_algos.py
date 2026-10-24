@@ -228,6 +228,31 @@ class LongWordHyphenation(unittest.TestCase):
             self.assertTrue(head.endswith("-"), word)
             self.assertEqual(head.rstrip("-") + tail, word, word)
 
+    def test_break_keeps_two_LETTERS_on_the_tail(self):
+        """Punctuation is not a letter: a tail of one letter and a "?"
+        reads as a typo ("DISPARARNO- / S?")."""
+        for limit in range(40, 200, 6):
+            got = self.fit.split_word(self.f, "regular", "DISPARARNOS?", 23,
+                                      limit)
+            if got:
+                self.assertGreaterEqual(
+                    sum(c.isalpha() for c in got[1]), 2, got)
+
+    def test_break_never_strands_a_consonant_cluster(self):
+        """V|CV is the open-syllable break; V|CC splits the cluster from the
+        vowel it belongs to ("RECONOCIMIE- / NTO"). Between two consonants
+        is the break there ("RECONOCIMIEN- / TO")."""
+        vowels = self.fit.VOWELS
+        for limit in range(60, 260, 4):
+            got = self.fit.split_word(self.f, "regular", "RECONOCIMIENTO",
+                                      23, limit)
+            if not got:
+                continue
+            head, tail = got[0].rstrip("-"), got[1]
+            self.assertFalse(
+                head[-1] in vowels and tail[0] not in vowels
+                and tail[1] not in vowels, got)
+
     def test_hopeless_size_fails_fast(self):
         """At the top of the size search every word is far too wide. Rather
         than shatter each into fragments (and run the line-break DP over

@@ -113,7 +113,11 @@ for stem in sorted(layout.keys()):
         bgroup = pdb.gimp_layer_group_new(img)
         pdb.gimp_item_set_name(bgroup, "bubble-%02d" % b["index"])
         pdb.gimp_image_insert_layer(img, bgroup, group, 0)
-        color = (255, 255, 255) if b.get("color") == "white" else (0, 0, 0)
+        color = b.get("color")
+        if isinstance(color, list):     # [r, g, b] — a `color` override
+            color = tuple(int(v) for v in color)
+        else:
+            color = (255, 255, 255) if color == "white" else (0, 0, 0)
         for li, line in enumerate(b["lines"]):
             runs = line["runs"]
             cx = ox + line["cx"]

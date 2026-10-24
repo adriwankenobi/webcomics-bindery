@@ -137,6 +137,18 @@ All of these take `SP=<scratch dir>` for their output (default
                            positional transcripts) and block-row coverage.
 - `redetect_apply.py`      apply re-detection (`PGS=ALL`, ~8 min book-wide);
                            backs up originals and REFUSES any count change.
+- `redetect_parts.py`      re-detect a TRANSCRIBED, NOT-YET-FITTED comic
+                           (pages by short key / stem prefix) and carry the
+                           parts/ transcripts across a COUNT change: each new
+                           entry takes the old entries mostly inside it (best
+                           IoU among nested ones; a caption box joins strips
+                           with a space). Reports NEW (no key = a gap the
+                           driver asks for), GONE (old text nobody takes) and
+                           REBUILT (a box made from strips: check or retype);
+                           `--apply` backs up, installs, updates the manifest
+                           count, strips the pages' old keys from the sheet
+                           parts and writes parts/zz-redetect.json. Refused
+                           once layout.json exists.
 
 ## Two traps that cost hours
 - Stage pages under their REAL on-disk filenames. transcripts.json is keyed on

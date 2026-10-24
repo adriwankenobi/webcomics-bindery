@@ -89,12 +89,20 @@ for stem in sorted(LAY):
             # the balloons themselves, with a rim's worth of slack — the
             # hand-measured rectangle is deliberately generous and holds
             # artwork above each balloon's arc
-            _got=_RF.lobes_from_rects(img,_ov['lobes'],b['bbox'])
+            _got=_RF.lobes_from_rects(img,_ov['lobes'],b['bbox'],_ov.get('oval',False))
             if _got is not None:
                 _lim=np.zeros((H,W),np.uint8)
                 _lim[y:y+h,x:x+w]=_got[0]
                 _lim=cv2.dilate(_lim,np.ones((41,41),np.uint8))
                 reg&=_lim
+        # a `box` override names the caption box the type went into, for an
+        # entry whose block leaked across the panel: the same reasoning —
+        # the box is the writing area, the art around it was never cleaned
+        if _ov and 'box' in _ov:
+            bx0,by0,bx1,by1=(int(v) for v in _ov['box'])
+            _lim=np.zeros((H,W),np.uint8)
+            _lim[max(0,by0-8):by1+8, max(0,bx0-8):bx1+8]=1
+            reg&=_lim
         hit=(lm>0)&(reg>0)
         if hit.sum()<25: continue
         n,lab,st,_=cv2.connectedComponentsWithStats(hit.astype(np.uint8),8)

@@ -227,7 +227,9 @@ relettering/qa_scan.py "<comic>"           pixel-diff cleaned pages vs
 - `typo_fixes.json` — `[wrong, fixed]` pairs applied at typeset time
   (transcripts stay a verbatim record of the source).
 - `layout_overrides.json` — per-bubble taste calls keyed `"<short> bNN"`:
-  `{"size": N}` pins a font size past group caps, `{"anchor": "visual"}`
+  `{"size": N}` pins a font size past group caps (`"orig"` = the original's
+  cap height), `{"color": "orig"}` keeps the original lettering's colour
+  (or `[r, g, b]`), `{"anchor": "visual"}`
   centers on the visible lobe, `{"anchor": "lines"}` places line-by-line
   following the original letterer's per-line axes.
 

@@ -30,8 +30,10 @@ topic's section of GOTCHAS.md. Key facts a session needs:
   reproducible from the source folder alone. No comic-specific content in
   tracked files. Per-comic editorial data = untracked JSONs in
   relettering/<comic>/: typo_fixes.json, layout_overrides.json
-  ({"size": N} | {"anchor": "visual"} | {"anchor": "lines"} | {"box":
-  [x0,y0,x1,y1]} | {"lobes": [[x0,y0,x1,y1], ...]}), fit_policy.json
+  ({"size": N | "orig"} | {"color": "orig" | [r,g,b]} | {"anchor":
+  "visual"} | {"anchor": "lines"} | {"box": [x0,y0,x1,y1]} | {"lobes":
+  [[x0,y0,x1,y1], ...]} (+ "oval": true for a gapped outline)),
+  fit_policy.json
   (per-book typographic calls an approved book must not inherit:
   {"frame_pairs": true} = a split caption pair in a frame is one box),
   parts/zz-*.json
@@ -81,9 +83,10 @@ topic's section of GOTCHAS.md. Key facts a session needs:
 ## Rules most re-lettering tasks hit (full reasoning in GOTCHAS.md)
 - Transcripts are POSITIONAL: one string per bubble in bNN order, keyed
   `"<short> bNN"` (`make_sheets.short_key`, never a copy of its regex).
-  Detection changes are only safe while the bubble COUNT per page holds:
-  re-detect into a scratch compare first and refuse any page whose count
-  moved.
+  Detection changes are only safe while the bubble COUNT and ORDER per
+  page hold: re-detect into a scratch compare first and refuse any page
+  whose count moved or whose entries regrouped at the same count
+  (redetect_apply.py checks both).
 - Verify EVERY batch with the three gates — leftover scan (mask UNION block
   UNION every laid-out line's box), qa_scan vs pristine/, and EXACT 1:1
   300dpi render overlays vs the source. Never substitute a proxy metric.

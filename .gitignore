@@ -35,6 +35,7 @@
 !/relettering/qa-tools/rebuild_fit.py
 !/relettering/qa-tools/redetect_dry.py
 !/relettering/qa-tools/redetect_apply.py
+!/relettering/qa-tools/redetect_parts.py
 !/relettering/qa-tools/split_caps.py
 !/relettering/qa-tools/gate_split.py
 !/relettering/qa-tools/boxleft.py

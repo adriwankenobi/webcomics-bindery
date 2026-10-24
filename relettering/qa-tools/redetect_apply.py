@@ -1,6 +1,8 @@
 """Apply re-detection for given drawn pages: writes bubbles JSON + masks +
 crops, after backing up the originals. REFUSES a page whose bubble count
-changed (that would invalidate its transcripts)."""
+changed, or whose entries moved place at the SAME count (bNN's box no longer
+mostly bNN's: balloons regrouped, so the order shifted) — either would hand
+the positional transcripts to the wrong balloons."""
 import os, json, os, shutil, sys, time, unicodedata
 if len(sys.argv) < 2:
     sys.exit('usage: redetect_apply.py "<comic folder name>"')
@@ -17,6 +19,14 @@ _p=os.environ['PGS']
 pages=(sorted(inv) if _p=='ALL' else [int(a) for a in _p.split(',')])
 src=Path(f'{R}/pristine'); OUT=Path(f'{R}/bubbles')
 applied=refused=0; t0=time.time(); done=0
+
+
+def iou(a, b):
+    ix=max(0,min(a[0]+a[2],b[0]+b[2])-max(a[0],b[0]))
+    iy=max(0,min(a[1]+a[3],b[1]+b[3])-max(a[1],b[1]))
+    return ix*iy/max(1,a[2]*a[3]+b[2]*b[3]-ix*iy)
+
+
 for pg in pages:
     stem=inv.get(pg)
     if not stem: continue
@@ -27,6 +37,10 @@ for pg in pages:
     img,new=D.detect_page(path)
     if len(new)!=len(old):
         print(f'p{pg}: REFUSED — count {len(old)} -> {len(new)}'); refused+=1; continue
+    moved=[i+1 for i,(o,e) in enumerate(zip(old,new)) if iou(o['bbox'],e['bbox'])<0.5]
+    if moved:
+        print(f'p{pg}: REFUSED — same count, entries moved: '
+              +', '.join(f'b{i:02d}' for i in moved)); refused+=1; continue
     # back up once
     for f in list(OUT.glob(f'{path.stem}.json'))+list(OUT.glob(f'{path.stem}-b*.png')):
         t=BK/f.name

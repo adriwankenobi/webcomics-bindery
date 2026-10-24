@@ -114,6 +114,10 @@ comic, page or round showed them.
   REFUSE any page whose count moved. Widening `letter_mask` to accept tinted
   fill (for gradient caption boxes) creates entries, so it cannot be done
   without re-transcribing those pages.
+  BEFORE the fit the count can move: `qa-tools/redetect_parts.py` carries
+  the parts/ transcripts to the new numbering by geometry (and refuses a
+  fitted comic). "Same count, same index" is not "unchanged" — an entry can
+  keep its index and become a caption box; compare kind, bbox and block.
 - `bubble_interior` walls the flood on a COLOUR change as well as on dark
   strokes (COLOUR_WALL). Where a balloon sits on pale sky and its outline has
   a gap, the fill escapes and the "interior" becomes balloon + page — which
@@ -150,6 +154,38 @@ comic, page or round showed them.
   merits). This ADDS entries on a re-detect, so an already-transcribed book
   must not be re-detected wholesale for it (it can also split a caption
   line) — dry-run and take only the pages that gain a missed balloon.
+- A short balloon of THREE stacked short lines whose letters FUSED in the
+  upscale has too few blobs for `paragraph_blocks` and was taller than the
+  short-utterance pass's one-or-two-line cap. The taller cap (three lines
+  of the cluster's own letter height) is guarded on every side, because
+  raised alone it admits mostly art (armour, faces, splatter, hatching):
+  the cluster must still be UNDER MIN_LETTERS, at least three blobs, inked
+  in solid strokes (ink >= 0.3 of the blobs' boxes — linework fills far
+  less), in a lobe JOINED to an already-detected balloon (its "comp"
+  host), and above or below the host's text — level with it, it is a piece
+  of those lines (a caption's column of small-caps initials).
+- Two balloons or caption boxes set CLOSE can have their lettering nearer
+  than `paragraph_blocks`' join (stacked: a gap no wider than a line gap;
+  side by side: a short neighbour's line running on from this one's), so
+  both fuse into ONE block. The block then picks one light component, the
+  other balloon never becomes an entry (no key, no mask, original lettering
+  left standing and partly wiped by the neighbour's clean), and no gate
+  ever rejected it — nothing downstream can see it is missing.
+  `split_by_balloon` splits such a block when its letters vote (by the
+  paper in a thin ring round each) for two or more light components with
+  MIN_LETTERS each. Three guards, each from a real false split: the groups
+  must not INTERLEAVE (letters of one group inside the other's blocks), each
+  group's blocks must lie INSIDE its component's box (halftone and hatched
+  art votes for the paper scraps between dots), and the area the old block
+  covered stays CLAIMED for the short-utterance pass, or the art marks it
+  swept up come back as new entries. A compound balloon's lobes are ONE
+  component and never split here. It ADDS entries: on a transcribed book,
+  re-detect only the pages that gain a missed balloon, and remap their keys.
+  It can also REGROUP at the same count (the freed lines join the balloon
+  they are joined to as a second paragraph, while the balloon that held
+  them loses its paragraph), which shifts the positional order without
+  moving the count — so a re-detect guard compares each bNN's box with the
+  old bNN's, never the count alone.
 
 ## Joined and compound balloons
 - Joined/overlapping balloons are SEPARATE entries, font-grouped; their
@@ -162,7 +198,12 @@ comic, page or round showed them.
   have no waist — a row span is a single x-range — so `mask_lobes` falls
   back to distance-transform peaks with nearest-peak assignment. Missing
   this crams every paragraph into one lobe at a tiny size and leaves the
-  other lobes empty.
+  other lobes empty. When the mask's lobes ARE side by side (their x ranges
+  overlap by under a quarter of the narrower: `lobes_side_by_side`), use
+  them BEFORE `find_bands`: two balloons that also share rows — one sits a
+  little lower — still have a waist in the union's row profile, and its
+  lower band spans both balloons, so that paragraph is set in the gap
+  between them, over whatever balloon sits there.
 - Overlap between two balloons is ceded whole to one of them; a balloon must
   never cede pixels inside its OWN text block, or its lettering is left
   uncleaned AND the fit has no room. But "its OWN" must exclude whatever the
@@ -221,6 +262,24 @@ comic, page or round showed them.
   region nothing ever cleaned: letter_mask finds letter-shaped pieces of
   ARTWORK in a leaked mask, and outside.py ranks correctly-placed `lobes`
   entries as the worst in the book.
+- A `lobes` rectangle also LIMITS WHAT IS CLEANED, so one rectangle around
+  part of a balloon re-letters that part and keeps the rest (a display word
+  kept original beside dialogue re-set in our font). Its edges must not
+  graze the lettering it is meant to clean: the interior is hole-filled, a
+  letter touching the rectangle's edge is not a hole, and it falls outside
+  both the interior and the lobe's block — that letter is never wiped and
+  the new text prints over it. Put the edge THROUGH what is to be kept (a
+  piece crossing the edge is excluded the same way) and check the job's
+  block spans the whole line before fitting.
+- `"oval": true` on a `lobes` override is for an oval balloon whose outline
+  has GAPS (a dashed whisper over pale art the walls cannot tell from the
+  fill): the rectangle's flood runs out between the dashes into its
+  corners, and the cleaner paints sky and wall white there. The flood is
+  clipped to the rectangle's ellipse a hair inside it (`OVAL_SCALE`), so
+  MEASURE THE RECTANGLE ON THE FILL (near-white flood from the text), not
+  on the outline — an ellipse that reaches the dashes wipes the ones that
+  touch a panel border or a neighbour. Its jobs are cleaned as `dashed`.
+  Measure it in page pixels, never by eye off a scaled preview.
 - BALLOONS FROM THE LETTERING (`letter_lobes`). Two balloons side by side in
   ONE entry often fail from the mask: the distance-transform peaks miss a
   balloon much smaller than its neighbour, lobes sorted on their top row
@@ -378,6 +437,42 @@ comic, page or round showed them.
   balloon leaked onto sky keeps the plain wall: its letters stand on white.
 
 ## Caption boxes
+- A caption box on a FLAT COLOURED fill (white on purple or blue, red on
+  yellow) is invisible to every letter pass: white-on-black wants a black
+  ring, the paper and tint passes want paper or letters dark in EVERY
+  channel. It comes back missing, or as strips seeded on a few letters,
+  with no key for the rest. `flat_caption_boxes` judges a letter by its
+  ring being ONE flat colour (median, most within FLAT_TOL, coloured:
+  spread >= FLAT_SPREAD); dark/coloured letters only on a VIVID fill —
+  muted tan or sky with dark marks is art. Grow over fill OR ink but only
+  while the step is mostly fill colour (a light frame line stops it), then
+  PEEL to the fill, alternately: ascenders above the box first make the
+  sideways steps cross art rows. A box must END at its frame (just outside
+  every side the fill colour is gone); a flat patch of art fades into more
+  of itself. The bbox stays INSIDE the frame because the 'dark' wipe takes
+  every white pixel in it — a white frame inside the bbox would be erased.
+  Small flat patches with white marks are everywhere in art (faces,
+  stripes, sign fragments): a box needs FLAT_MIN_BOX. Not a higher letter
+  count: in a narrow italic only some letters pass the ring test, so a real
+  one-word caption seeds a 5-letter block.
+  A drawn frame does NOT separate boxes from art — the line just outside a
+  real box is frame + art, no more uniform than art's own edges.
+- A caption box never holds a BALLOON. A flat-coloured PANEL (a sign, a
+  screen) with a paper balloon over it passes every box test, and replacing
+  would delete the balloon: refuse a box when any entry it would replace
+  has its letters on paper. Judge the very entries the replace step takes
+  (block area inside) — a containment test of their bbox misses a balloon
+  that sticks out of the panel. Paper balloons measure ~0.75 light, strips
+  of white type on colour <= 0.5.
+- The flat box REPLACES the entries seeded inside it by the AREA of their
+  letter blocks over all the boxes, not by the block's centre: one entry
+  seeded across two neighbouring boxes has its centre in the gap and
+  survives beside them, lettered over both. White letters -> 'dark' (the
+  row-median wipe works on any fill colour); coloured letters -> 'tint',
+  whose ink is `tint_ink` — dark in every channel OR far below the fill's
+  luma (a red letter's red channel is as bright as yellow). One predicate
+  for the wipe, the cap height and the original colour: orig_ink_rgb's
+  general cut (weakest channel dark) takes a whole yellow fill for ink.
 - `clean_caption_box` estimates the fill under a word by INTERPOLATING across
   it from the fill either side, per row. A morphological close is right for
   FINDING the ink (it is only a threshold) and wrong for replacing it: a
@@ -489,6 +584,36 @@ comic, page or round showed them.
   band of FILL that a touching letter fused with and was spared as a
   "curve". Curves are classified per test, and a min-only band never spares
   what the max channel calls lettering.
+- A SOLE-BOX caption keeps its HEIGHT: the writing area's inset is 2% of
+  the box's WIDTH, and taken vertically on a wide one-line strip it removed
+  a third of the height from each side — the caption came out at half the
+  book size in a box with room for all of it. The vertical inset is capped
+  at a tenth of the box's height.
+- A graded fill that turns DARK at one edge reads as frame there (under
+  FRAME_SOFT and touching black), the flood stops short of that edge and
+  the box fails the rectangle test — it then comes back as strips that do
+  not agree on x, each typeset on its own. `regrow_fill` gives the fill
+  back the wall pixels just under FRAME_SOFT (`REGROW_BAND`) that continue
+  it smoothly, only inside the flood's own bounding box, and only as a
+  SECOND attempt when the plain flood finds no box. Applied always, it took
+  the inner pixels of faint frames for fill and failed their four-sides
+  test; unbounded, or reaching down towards FRAME_MAX, it flowed back out
+  through the hairline gaps `frame_wall` seals and through grey frames.
+  Either way real boxes were lost by the dozen across a book — run the
+  frame finder over every page of every book before and after any change
+  here.
+- A framed caption detection holds whole as ONE balloon-kind entry is a box
+  too (`plain` in `auto_caption_boxes`): fitted as a balloon, its lines
+  follow the mask's rows and the letterer's per-line axes, so a long
+  caption wraps ragged inside a rectangle and its first line can sit alone
+  off to one side.
+- ALIGNMENT follows the letterer: where his lines share a start and their
+  ends are ragged (`orig_flush_left`: 3+ lines, starts within 0.6 cap, ends
+  spread 2+ cap) our lines are set flush left at his edge
+  (`flush_left_lines`, each kept inside its own row span). Centred type has
+  both edges ragged and a justified block neither. Read his letters with
+  the entry's own ink (`orig_ink`): on a yellow fill "dark in every
+  channel" is the whole box.
 
 ## Fit, sizing and placement
 - One long word must never shrink a bubble: `hyphenate`/`split_word` break
@@ -542,6 +667,11 @@ comic, page or round showed them.
   measured per-line axes, confined to the original text's vertical
   envelope. Users judge centering against the VISIBLE lobe and the
   original page — verify by rendering, never by layout numbers alone.
+- A balloon the artist ran off the PAGE has no outline there — its
+  interior is the edge — so no inset keeps the type off it and the first
+  line printed flush against the page border. `clear_page_edge` holds the
+  row profile a fraction of the original cap height clear of the page's
+  edges, as an outline would.
 
 ## Text parsing and transcripts
 - `parse_runs` resolves style PER CHARACTER, then splits on whitespace. A

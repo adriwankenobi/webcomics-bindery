@@ -226,8 +226,9 @@ smoke):
    paragraphs, bbox, block, rows), a mask PNG and a 2× crop PNG per bubble.
 
 Bubble kinds: `bubble` (masked balloon), `dark` (white-on-black caption →
-white text), `tint` (dark text on tinted box → row-median clean, black
-text), `open` (grown rectangle on light ground), `margin` (page-margin
+white text; also white on a flat coloured fill), `tint` (dark or coloured
+text on tinted box → row-median clean of `tint_ink`, black text unless a
+colour override), `open` (grown rectangle on light ground), `margin` (page-margin
 note). Covers, index/credits and art pages are skipped (`is_story_page`).
 
 ### Stage 1.5 — keep or re-letter (`reletter_decide.py`, `issue_plan.py`)
@@ -493,7 +494,11 @@ jobs), and `lobe_bands` prefers it to the waist cut.
 
 **Per-bubble editorial overrides** — `relettering/<comic>/
 layout_overrides.json`, keyed `"<short> bNN"`: `{"size": N}` pins the font
-size (bypassing group caps), `{"anchor": "visual"}` forces the visual
+size (bypassing group caps) and `{"size": "orig"}` pins it at the original
+letterer's measured cap height; `{"color": "orig"}` sets the text in the
+original lettering's colour (median of the letters' cores in the block,
+measured before cleaning) and `{"color": [r, g, b]}` in a given one — display
+type re-set in our font at its printed size and colour. `{"anchor": "visual"}` forces the visual
 center, `{"anchor": "lines"}` forces the per-line mode, `{"box": [x0,y0,
 x1,y1]}` names a caption box detection only half-found, and `{"lobes":
 [[x0,y0,x1,y1], …]}` replaces a mask that leaked past recognition. The

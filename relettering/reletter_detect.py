@@ -41,6 +41,8 @@ LETTER_H = (9, 48)        # px height of one letter (caps ~17-24 here)
 LETTER_W_MAX = 110
 LETTER_AREA_MAX = 2200
 MIN_LETTERS = 8           # a real text block has at least this many blobs
+SPLIT_MIX = 0.2           # split_by_balloon: letters one balloon may stray
+SPLIT_HELD = 0.9          # ...and share of each block inside its balloon
 BOX_MIN_LETTERS = 5       # ...or this many inside a drawn caption frame
 PAD_FRAC = 0.03
 
@@ -299,6 +301,134 @@ def white_letter_mask(img: np.ndarray) -> np.ndarray:
     return keep[labels].astype(np.uint8)
 
 
+FLAT_TOL = 40             # a caption fill's pixels sit within this of its median
+FLAT_SPREAD = 60          # ...and the fill is COLOURED (max - min channel)
+VIVID_SPREAD = 150        # dark/coloured letters only on a vivid fill (yellow)
+FLAT_MIN_BOX = (100, 40)  # w, h: smaller flat patches are art (faces, stripes)
+
+
+def flat_letters(img: np.ndarray) -> np.ndarray:
+    """Letters of caption boxes on a FLAT COLOURED fill: 1 = white letters
+    (white on purple/blue), 2 = dark or coloured letters (red on yellow).
+    The white-on-black pass wants a black ring and the light-paper and tint
+    passes a ring of paper or letters dark in every channel, so all three are
+    blind to these. The ring here only has to be ONE flat colour: its median,
+    with the neighbouring letters left out, and most of it within FLAT_TOL."""
+    out = np.zeros(img.shape[:2], np.uint8)
+    lum = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+    for sense, cand in ((1, img.min(axis=2) >= 200), (2, lum <= 110)):
+        n, lab, st, _ = cv2.connectedComponentsWithStats(
+            cand.astype(np.uint8), 8)
+        for i in range(1, n):
+            x, y, w, h, area = st[i]
+            if not (LETTER_H[0] <= h <= 40 and w <= 100
+                    and 8 <= area <= 1800):
+                continue
+            y0, y1 = max(0, y - 3), min(img.shape[0], y + h + 3)
+            x0, x1 = max(0, x - 3), min(img.shape[1], x + w + 3)
+            ring = ~cand[y0:y1, x0:x1]
+            px = img[y0:y1, x0:x1][ring].astype(int)
+            if len(px) < 10:
+                continue
+            c = np.median(px, axis=0)
+            if c.max() - c.min() < FLAT_SPREAD:
+                continue        # grey, black or white ground: not this pass
+            if (np.abs(px - c).max(axis=1) <= FLAT_TOL).mean() < 0.6:
+                continue
+            out[lab == i] = sense
+    return out
+
+
+def flat_box(near, ink, block, shape):
+    """The fill rectangle round a letter block: grown over fill or ink while
+    each step is mostly fill COLOUR (so a light frame line stops it), then
+    peeled back to where the fill starts, alternately until neither moves —
+    a block whose ascenders poke above the box first grows sideways through
+    art rows, and only the peel fixes that."""
+    H, W = shape
+    fill = near | ink
+    bx, by, bw, bh = block
+    x0, y0, x1, y1 = bx, by, bx + bw, by + bh
+
+    def ok(sl):
+        return fill[sl].mean() > 0.9 and near[sl].mean() >= 0.4
+
+    for _ in range(4):
+        moved = False
+        for _ in range(60):
+            grew = False
+            if x0 > 4 and ok(np.s_[y0:y1, x0 - 4:x0]):
+                x0 -= 4; grew = True
+            if x1 < W - 4 and ok(np.s_[y0:y1, x1:x1 + 4]):
+                x1 += 4; grew = True
+            if y0 > 4 and ok(np.s_[y0 - 4:y0, x0:x1]):
+                y0 -= 4; grew = True
+            if y1 < H - 4 and ok(np.s_[y1:y1 + 4, x0:x1]):
+                y1 += 4; grew = True
+            if not grew:
+                break
+            moved = True
+        for _ in range(16):
+            peeled = False
+            if y1 - y0 > 20 and near[y0, x0:x1].mean() < 0.5:
+                y0 += 1; peeled = True
+            if y1 - y0 > 20 and near[y1 - 1, x0:x1].mean() < 0.5:
+                y1 -= 1; peeled = True
+            if x1 - x0 > 20 and near[y0:y1, x0].mean() < 0.5:
+                x0 += 1; peeled = True
+            if x1 - x0 > 20 and near[y0:y1, x1 - 1].mean() < 0.5:
+                x1 -= 1; peeled = True
+            if not peeled:
+                break
+            moved = True
+        if not moved:
+            break
+    return x0, y0, x1, y1
+
+
+def flat_caption_boxes(img: np.ndarray) -> list:
+    """[(kind, block, box)] for caption boxes on a flat coloured fill —
+    kind 'dark' (white letters: the fit wipes them with the row median of
+    the fill, whatever its colour, and sets white type) or 'tint' (dark or
+    coloured letters on a vivid fill). A box must be filled (>= 0.85 fill or
+    letters) and END at its frame: just outside every side the fill colour
+    is gone — a patch of flat art fades into more of itself."""
+    H, W = img.shape[:2]
+    fl = flat_letters(img)
+    lum = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+    found = []
+    for sense, kind in ((1, "dark"), (2, "tint")):
+        letters = (fl == sense).astype(np.uint8)
+        inkp = (img.min(axis=2) >= 140) if sense == 1 else (lum <= 130)
+        ink = cv2.dilate(inkp.astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
+        for (bx, by, bw, bh) in paragraph_blocks(
+                letters, min_letters=BOX_MIN_LETTERS):
+            reg = img[by:by + bh, bx:bx + bw].reshape(-1, 3).astype(int)
+            c = np.median(reg[letters[by:by + bh, bx:bx + bw].reshape(-1) == 0],
+                          axis=0)
+            if sense == 2 and c.max() - c.min() < VIVID_SPREAD:
+                continue
+            near = np.abs(img.astype(int) - c).max(axis=2) <= FLAT_TOL
+            x0, y0, x1, y1 = flat_box(near, ink, (bx, by, bw, bh), (H, W))
+            if x1 - x0 < FLAT_MIN_BOX[0] or y1 - y0 < FLAT_MIN_BOX[1]:
+                continue
+            if (near | ink)[y0:y1, x0:x1].mean() < 0.85:
+                continue
+            o = 6
+            sides = (near[max(0, y0 - o):max(0, y0 - 2), x0:x1],
+                     near[y1 + 2:y1 + o, x0:x1],
+                     near[y0:y1, max(0, x0 - o):max(0, x0 - 2)],
+                     near[y0:y1, x1 + 2:x1 + o])
+            if max((s.mean() if s.size else 0.0) for s in sides) > 0.3:
+                continue
+            blk = (max(bx, x0), max(by, y0),
+                   min(bx + bw, x1) - max(bx, x0),
+                   min(by + bh, y1) - max(by, y0))
+            if blk[2] > 0 and blk[3] > 0:
+                found.append((kind, blk, (x0, y0, x1 - x0, y1 - y0)))
+    return found
+
+
 def paragraph_blocks(letters: np.ndarray,
                      min_letters: int = MIN_LETTERS) -> list:
     """Group letter blobs into paragraph blocks (dilate then components)."""
@@ -314,6 +444,85 @@ def paragraph_blocks(letters: np.ndarray,
         if count >= min_letters and w >= 40 and h >= 14:
             blocks.append((x, y, w, h))
     return blocks
+
+
+def split_by_balloon(blocks: list, letters: np.ndarray,
+                     labels: np.ndarray) -> list:
+    """Split a paragraph block whose letters sit in DIFFERENT balloons.
+
+    Two balloons (or caption boxes) close together set their lettering
+    nearer than paragraph_blocks' join — stacked, the gap is no wider than
+    a line gap; side by side or diagonal, a short neighbour's line runs on
+    from this one's — so the lines of both fuse into ONE block, the block
+    picks one balloon, and the other one's lines are never an entry: no
+    key, no mask, the original lettering stays, partly wiped by the
+    neighbour's clean. Each letter votes for the light component in a thin
+    ring round it (the paper it is printed on). When two or more components
+    each hold MIN_LETTERS letters, each group is blocked on its own — kept
+    only if the groups do not INTERLEAVE (at most SPLIT_MIX of a group's
+    letters, or two, inside another group's blocks, which reach a word gap
+    past their letters: one balloon whose fill is cut by art has its groups
+    mixed along the same lines) and each group's blocks lie INSIDE its
+    component's box, as text lies inside its balloon (on halftone or hatched
+    art the "letters" vote for scraps of paper between dots, which hold no
+    block — a false entry is not split). A compound balloon's lobes are ONE
+    light component and never split here (that is the paragraphs/lobes
+    path). Letters voting for a minor region (a stray tint, a ring that is
+    mostly other letters) join the nearest group."""
+    n, ll, ls, _ = cv2.connectedComponentsWithStats(letters, 8)
+    if n <= 1:
+        return list(blocks)
+    cx = ls[:, 0] + ls[:, 2] // 2
+    cy = ls[:, 1] + ls[:, 3] // 2
+    H, W = letters.shape
+    out = []
+    for blk in blocks:
+        bx, by, bw, bh = blk
+        groups = {}
+        for i in range(1, n):
+            if not (bx <= cx[i] < bx + bw and by <= cy[i] < by + bh):
+                continue
+            x, y, w, h = (int(v) for v in ls[i][:4])
+            y0, y1 = max(0, y - 4), min(H, y + h + 4)
+            x0, x1 = max(0, x - 4), min(W, x + w + 4)
+            sub = labels[y0:y1, x0:x1]
+            ring = (sub > 0) & (ll[y0:y1, x0:x1] != i)
+            k = int(np.bincount(sub[ring]).argmax()) if ring.sum() >= 20 else 0
+            groups.setdefault(k, []).append(i)
+        keys = [k for k, g in groups.items() if k and len(g) >= MIN_LETTERS]
+        big = [groups[k] for k in keys]
+        if len(big) < 2:
+            out.append(blk)
+            continue
+        for k, g in groups.items():
+            if k and len(g) >= MIN_LETTERS:
+                continue
+            for i in g:     # nearest big group: closest letter centre
+                d = [np.hypot(cx[g2] - cx[i], cy[g2] - cy[i]).min()
+                     for g2 in big]
+                big[int(np.argmin(d))].append(i)
+        parts = [paragraph_blocks(np.isin(ll, g).astype(np.uint8))
+                 for g in big]
+
+        def held(k, p):
+            ys, xs = np.nonzero(labels == k)
+            x0, y0, x1, y1 = xs.min(), ys.min(), xs.max() + 1, ys.max() + 1
+            return all(max(0, min(x + w, x1) - max(x, x0))
+                       * max(0, min(y + h, y1) - max(y, y0))
+                       >= SPLIT_HELD * w * h for x, y, w, h in p)
+
+        def strays(g, p):
+            return sum(any(x <= cx[i] < x + w and y <= cy[i] < y + h
+                           for x, y, w, h in p) for i in g)
+        if (any(not p for p in parts)
+                or not all(held(k, p) for k, p in zip(keys, parts))
+                or any(strays(g, p) > max(2, SPLIT_MIX * len(g))
+                       for j, g in enumerate(big)
+                       for m, p in enumerate(parts) if m != j)):
+            out.append(blk)
+            continue
+        out.extend(b for p in parts for b in p)
+    return out
 
 
 def follow_lobe(comp, bcy, ref, bw, text_drift=False):
@@ -742,7 +951,11 @@ def detect_page(path: Path):
         return (closed | (1 - flood))[6:-6, 6:-6]
 
     entries = {}
-    pblocks = paragraph_blocks(letters)
+    raw = paragraph_blocks(letters)
+    pblocks = split_by_balloon(raw, letters, labels)
+    # what a split block covered stays claimed (below): the short-utterance
+    # pass must not read the art marks it swept up as new utterances
+    swept = [b for b in raw if b not in pblocks]
     for (bx, by, bw, bh) in pblocks:
         # bubble = the light component most present just around the block
         y0, y1 = max(0, by - 6), min(h, by + bh + 6)
@@ -928,8 +1141,7 @@ def detect_page(path: Path):
     # fake row intervals across the waist and center the short text between
     # the lobes instead of inside its own)
     claimed = np.zeros_like(letters)
-    for e in entries.values():
-        ebx, eby, ebw, ebh = e["block"]
+    for ebx, eby, ebw, ebh in [e["block"] for e in entries.values()] + swept:
         claimed[eby:eby + ebh, ebx:ebx + ebw] = 1
     spare = letters & (1 - claimed)
     # wider horizontal join than paragraph_blocks: ellipses between short
@@ -942,9 +1154,24 @@ def detect_page(path: Path):
     ncc, _, scc, _ = cv2.connectedComponentsWithStats(joined, 8)
     for i in range(1, ncc):
         bx, by, bw, bh = (int(v) for v in scc[i][:4])
-        cnt = int(cv2.connectedComponentsWithStats(
-            spare[by:by + bh, bx:bx + bw], 8)[0]) - 1
-        if not (2 <= cnt and bw >= 30 and 12 <= bh <= 60):
+        cn, _, cst, _ = cv2.connectedComponentsWithStats(
+            spare[by:by + bh, bx:bx + bw], 8)
+        cnt = int(cn) - 1
+        # up to THREE short lines tall, measured in the cluster's own letters:
+        # a stacked "NO, / AMIGO / MÍO." whose letters fused in the upscale
+        # has too few blobs for paragraph_blocks, and the fixed 60 px cap (one
+        # or two lines) refused it. The taller cap admits art far more often
+        # than text, so it holds only for a cluster that is still too SMALL
+        # to be a paragraph, inked in solid letter strokes (hatching and
+        # linework are thin lines that fill a fraction of their boxes), and
+        # sitting in a lobe JOINED to an already-detected balloon (below)
+        med_h = float(np.median(cst[1:, 3])) if cnt else 0.0
+        tall = bh > 60
+        if not (2 <= cnt and bw >= 30
+                and 12 <= bh <= max(60, 3 * 1.25 * med_h)):
+            continue
+        if tall and not (3 <= cnt < MIN_LETTERS and cst[1:, 4].sum()
+                         >= 0.3 * (cst[1:, 2] * cst[1:, 3]).sum()):
             continue
         # MIN_LETTERS or more only when the WIDE join made the cluster: an
         # ellipsis between words is too small to be a letter, so "PU...
@@ -963,6 +1190,13 @@ def detect_page(path: Path):
             continue
         lab = int(np.bincount(cand).argmax())
         host = entries.get(("comp", lab))
+        if tall and (host is None or host.get("mask") is None
+                     or host["block"][1] <= by + bh // 2
+                     <= host["block"][1] + host["block"][3]):
+            # ...and a lobe of its own sits above or below the host's text:
+            # beside it, in the same rows, it is a piece of those lines (a
+            # caption's column of small-caps initials), not another balloon
+            continue
         if host is not None and host.get("mask") is not None:
             ox, oy = int(stats[lab][0]), int(stats[lab][1])
             ow, oh = int(stats[lab][2]), int(stats[lab][3])
@@ -1311,6 +1545,69 @@ def detect_page(path: Path):
             "bbox": [int(gx0), int(gy0),
                      int(gx1 - gx0), int(gy1 - gy0)],
             "mask": None}
+
+    # caption boxes on a FLAT COLOURED fill (white on purple or blue, red on
+    # yellow): every pass above is blind to them, so they came back missing
+    # or as strips and fragments seeded on a few of their letters, with no
+    # key for the rest. The boxes REPLACE every entry whose letter block lies
+    # mostly inside them — by AREA over all the boxes, not by the block's
+    # centre: one entry seeded across two neighbouring boxes has its centre
+    # in the gap and would be lettered over both. A box already found whole
+    # is left alone.
+    def _area_in(e, bx0, by0, bw0, bh0):
+        x, y, w2, h2 = e["bbox"]
+        ix = max(0, min(x + w2, bx0 + bw0) - max(x, bx0))
+        iy = max(0, min(y + h2, by0 + bh0) - max(y, by0))
+        return ix * iy
+    flat = {}
+    for kind, (kx, ky, kw, kh), (bx0, by0, bw0, bh0) in flat_caption_boxes(img):
+        if any(e["kind"] in ("dark", "tint")
+               and _area_in(e, bx0, by0, bw0, bh0) >= 0.5 * bw0 * bh0
+               for k, e in entries.items() if k[0] != "flat"):
+            continue
+        # a caption box never holds a BALLOON: an entry inside it whose
+        # letters sit on paper makes it a flat-coloured panel (a sign, a
+        # screen) with a balloon over it — replacing would delete the balloon
+        # (judged on exactly the entries the box would replace)
+        def _on_paper(e):
+            x, y, w2, h2 = e["block"]
+            reg = img[y:y + h2, x:x + w2]
+            # paper balloons ~0.75; strips of white type on colour <= 0.5
+            return reg.size and (reg.min(axis=2) >= 200).mean() > 0.6
+
+        def _block_in(e):
+            x, y, w2, h2 = e["block"]
+            ix = max(0, min(x + w2, bx0 + bw0) - max(x, bx0))
+            iy = max(0, min(y + h2, by0 + bh0) - max(y, by0))
+            return ix * iy >= 0.5 * max(1, w2 * h2)
+        if any(_block_in(e) and _on_paper(e)
+               for k, e in entries.items() if k[0] != "flat"):
+            continue
+        twin = next((k for k, e in flat.items()
+                     if _area_in(e, bx0, by0, bw0, bh0)
+                     >= 0.5 * min(bw0 * bh0, e["bbox"][2] * e["bbox"][3])),
+                    None)
+        if twin is not None:      # a second paragraph of a box already made
+            b = flat[twin]["block"]
+            x0, y0 = min(b[0], kx), min(b[1], ky)
+            x1 = max(b[0] + b[2], kx + kw); y1 = max(b[1] + b[3], ky + kh)
+            flat[twin]["block"] = [int(x0), int(y0), int(x1 - x0), int(y1 - y0)]
+            continue
+        flat[("flat", bx0 // 50, by0 // 50)] = {
+            "kind": kind, "block": [int(kx), int(ky), int(kw), int(kh)],
+            "bbox": [int(bx0), int(by0), int(bw0), int(bh0)],
+            "mask": None}
+    if flat:
+        inbox = np.zeros((h, w), bool)
+        for e in flat.values():
+            x, y, w2, h2 = e["bbox"]
+            inbox[y:y + h2, x:x + w2] = True
+        for k in [k for k, e in entries.items()
+                  if inbox[e["block"][1]:e["block"][1] + e["block"][3],
+                           e["block"][0]:e["block"][0] + e["block"][2]].mean()
+                  >= 0.5]:
+            del entries[k]
+        entries.update(flat)
 
     # merge entries whose masks overlap: the lobes of one compound balloon
     # (each keeps its own text block; the merged bubble holds N paragraphs)
