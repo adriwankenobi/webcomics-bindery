@@ -181,7 +181,13 @@ smoke):
      outside the block (a border sealed into the mask by hole-fill);
    - a **neck cut** removes mask beyond the narrowest pinch outside the
      block when the profile re-expands past it (flood escaped through an
-     outline gap; a balloon's own arc tip never re-expands).
+     outline gap; a balloon's own arc tip never re-expands);
+   - the **letters are not the barrier** (closed with the outline, a letter
+     near it is welded on and the flood comes back with a bite out of its
+     first and last lines);
+   - a flood that holds **another block's lettering** (balloons joined with
+     no outline between them) keeps only its side of the seam between the
+     two letterings (`carve_rivals`) before the row walk.
 5. **Compound balloons — separate entries, never one.** A second block in
    the same light component becomes its own entry (own mask, own transcript
    string); short utterances below the letter-count floor get their own
@@ -348,6 +354,11 @@ enclose**: a bite is a pocket, a leak is enclosed by nothing. The block bound
 alone is not enough — the blob cluster reaches past the balloon's own arc, so
 an escape onto pale sky lands *inside* it.
 
+**Tails** (`clip_tails`, single-paragraph balloons): leaving the widest
+row a balloon's edges only close in, so an edge that runs back out while
+the other keeps closing is a tail's mouth, and is held to its running
+extreme — no line is set out into the tail.
+
 **Row profile** (`resolve_rows`): the balloon's own fill is the authority in
 both directions — clip where the profile leaked past it, restore the width
 where the profile sits further inside it than its own clearance (`rows` is
@@ -440,7 +451,8 @@ Each rung runs a **minimal-deviation vertical search** (dy = 0, ±3 …
 few px away, and a small slide beats falling to the next rung whose x sits
 tens of px off the original axis. Two-paragraph masks with a real waist are
 banded per lobe first (`find_waist`), falling through to the ladder when
-banding fails; multi-paragraph wraps re-anchor each paragraph on the
+banding fails — which must still keep each paragraph inside its own band
+(`paras_in_bands`); multi-paragraph wraps re-anchor each paragraph on the
 original letterer's per-paragraph axis (`orig_para_axes`) or the band's
 visual center. Line breaking is a DP that minimizes squared slack per line
 ("pyramid" look); each line finally centers on its axis clamped into its
@@ -481,8 +493,10 @@ framed box are dropped from `caption_boxes`' results.
 
 **Balloons found from the lettering** (`letter_lobes`, in
 `prepare_bubble`). Where the mask cannot give the balloons — two paragraphs
-side by side in one entry, or a mask that leaked well past or stops well
-short of the balloons the lettering is in — the letterer's own letters are
+side by side in one entry, a mask that leaked well past or stops well
+short of the balloons the lettering is in, paragraphs walled into balloons
+of their own, or a non-convex mask with no waist and no distance peaks
+(balloons joined at a notch) — the letterer's own letters are
 split into one group per paragraph (`letter_groups`, MST gaps), put in
 comic reading order (`reading_order`: left before right when two share most
 of their height; `mask_lobes` uses it too), and each balloon is the walled
@@ -501,8 +515,11 @@ measured before cleaning) and `{"color": [r, g, b]}` in a given one — display
 type re-set in our font at its printed size and colour. `{"anchor": "visual"}` forces the visual
 center, `{"anchor": "lines"}` forces the per-line mode, `{"box": [x0,y0,
 x1,y1]}` names a caption box detection only half-found, and `{"lobes":
-[[x0,y0,x1,y1], …]}` replaces a mask that leaked past recognition. The
-escape hatch for taste calls no global rule should be bent around.
+[[x0,y0,x1,y1], …]}` replaces a mask that leaked past recognition, and
+`{"keep": [[x0,y0,x1,y1], …]}` puts back, after the wipe, the coloured ink
+(and the dark outline touching it) inside each rectangle — a sound effect
+drawn over the balloon's edge. The escape hatch for taste calls no global
+rule should be bent around.
 
 **Cleaning** (only bubbles that got a layout — a fit failure must never
 blank a bubble):

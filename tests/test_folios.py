@@ -103,6 +103,29 @@ class Folios(unittest.TestCase):
         plan, _ = process.find_folios(pages)
         self.assertEqual(plan, {})
 
+    def test_touching_digits_are_one_number(self):
+        # a scan can fuse a number's two digits into ONE ink piece, wider
+        # than tall: those pages kept their printed number
+        def fused(n):
+            im = page()
+            d = ImageDraw.Draw(im)
+            x, y = W // 2, int(H * 0.972)
+            for k, ch in enumerate(str(n)):
+                d.text((x - 5 + 10 * k, y), ch, font=FONT, fill=(60, 60, 60),
+                       anchor="mm")
+            return im
+        pages = [self.save(f"Comic 4 - D {i:03d}.jpg", page(i + 2))
+                 for i in range(4, 10)]
+        pages += [self.save(f"Comic 4 - D {i:03d}.jpg", fused(i + 2))
+                  for i in range(10, 13)]
+        with Image.open(pages[-1]) as im:      # the digits do touch
+            a = np.asarray(im.convert("L"))
+            band = a[int(H * 0.95):, W // 2 - 40:W // 2 + 40] < 128
+            self.assertEqual(len(process._label(band)), 1)
+        plan, _ = process.find_folios(pages)
+        for p in pages[-3:]:
+            self.assertIn(p.name, plan)
+
     def test_spreads_carry_one_number_under_each_half(self):
         pages = [self.save(f"Comic 4 - D {i:03d}.jpg", page(i + 2))
                  for i in range(4, 10)]

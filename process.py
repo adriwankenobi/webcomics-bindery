@@ -672,13 +672,18 @@ def _digit_groups(rgb, page_h: int, strict: bool) -> list:
             y0, y1, x0, x1 = ys.min(), ys.max() + 1, xs.min(), xs.max() + 1
             ch, cw = y1 - y0, x1 - x0
             fill = len(ys) / (ch * cw)
-            # a "1" is a bar: solid fill is fine when the mark is that thin
-            if (lo <= ch <= hi and 0.12 * ch <= cw <= ch
-                    and 0.15 <= fill <= (1.0 if cw <= 0.3 * ch else 0.9)
+            # a "1" is a bar: solid fill is fine when the mark is that thin.
+            # Wider than tall is two or three digits the scan FUSED into one
+            # piece (n = how many it stands for): those pages kept their
+            # printed number. Strokes, not blobs: fill stays well under 1.
+            n = 1 if cw <= ch else (2 if cw <= 2.1 * ch else 3)
+            if (lo <= ch <= hi and 0.12 * ch <= cw <= 3.1 * ch
+                    and 0.15 <= fill <= (1.0 if cw <= 0.3 * ch
+                                         else 0.9 if n == 1 else 0.75)
                     and x0 > 0 and x1 < rw and y1 < rh):
                 digits.append({"box": (x0, y0, x1, y1), "h": ch, "fill": fill,
                                "lum": float(np.median(luma[ys, xs])),
-                               "ys": ys, "xs": xs})
+                               "ys": ys, "xs": xs, "n": n})
         digits.sort(key=lambda c: c["box"][0])
         used = set()
         for i, c in enumerate(digits):
@@ -693,7 +698,7 @@ def _digit_groups(rgb, page_h: int, strict: bool) -> list:
                         and d["box"][0] - last["box"][2] <= 0.6 * c["h"]):
                     grp.append(j)
             used.update(grp)
-            if len(grp) > 3:
+            if sum(digits[g]["n"] for g in grp) > 3:
                 continue        # a line of lettering, not a page number
             members = [digits[g] for g in grp]
             x0 = min(m["box"][0] for m in members)

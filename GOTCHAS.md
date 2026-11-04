@@ -28,6 +28,14 @@ comic, page or round showed them.
   re-measures. Narrower than the refused dust rule. `trim_folio_band` must
   not return early when the bottom is already tight — it would skip its
   side check, and a 1px speck in from the edge holds the page small.
+- TOUCHING DIGITS: a scan can fuse a folio's two digits into ONE ink
+  piece, wider than tall, which the single-digit shape test refuses — the
+  page keeps its printed number. A piece of a digit's height up to ~3
+  digit widths counts as 2-3 fused digits (towards the 3-digit limit),
+  with a stroke fill well under solid. The cached plan (folios.json) is
+  NOT recomputed by a code change, and rewriting it makes every numbered
+  page older than the plan, i.e. stale: keep the file's mtime and delete
+  only the pages to regenerate.
 - A fitted book's upscaled/ pages ARE the cleaned working pages, so
   `cmd_upscale` KEEPS (prints `KEPT:`) any existing page whose expected
   upscale changed once layout.json exists — it used to re-upscale it in
@@ -102,6 +110,19 @@ comic, page or round showed them.
   ring-component union + border-row bridge (bridge = row UNION, never
   intersection) inside strict_bubble; leaks get the dark-row cut and the
   neck cut.
+- THE LETTERS ARE NOT strict_bubble's WALL. Closed with the outline, a
+  letter within ~7px of it is welded on, stops being a hole, and the flood
+  comes back with a BITE out of the first and last lines: the row walk
+  stops at the bite inside the block, and a balloon drawn tight round big
+  lettering fails the area/coverage acceptance and drops to a fallback
+  that loses half its text. The letter mask is taken out of the barrier
+  before the close.
+- TWO BALLOONS JOINED WITH NO OUTLINE between them are one free-space
+  component, so the flood from one block fills both; each row then spans
+  both balloons, the span's centre jumps where their tops differ, and the
+  walk stops mid-text. `carve_rivals` keeps only this block's side of the
+  seam between the two letterings (`seam_split`) before the walk — only
+  where the flood holds a real amount of another block's letters.
 - The refine pass (`strict_bubble` per lobe) may miss 15% of the block's
   rows, but not as a TRUNCATION at an end of it: a flood that stops short
   of the block's bottom is accepted on coverage, the mask loses the last
@@ -186,6 +207,19 @@ comic, page or round showed them.
   them loses its paragraph), which shifts the positional order without
   moving the count — so a re-detect guard compares each bNN's box with the
   old bNN's, never the count alone.
+- A SHORT BALLOON OF BIG LETTERS. The short-utterance pass measures its
+  clusters after a wide join (45 px), so (1) two short lines of big
+  lettering exceed the fixed 60 px "one or two lines" cap and are taken
+  for three, which is only accepted joined to a host; (2) a free-standing
+  balloon drawn tight round them is under twice that dilated box. The cap
+  is 2.5 of the cluster's own letter heights — but ONLY for a cluster
+  that reads as lettering (>= SHORT_TWO_LINE_MIN blobs, solid strokes,
+  ink for its letter size): at that height the paper scraps of artwork
+  pass too, 2-4 thin marks each, and unguarded it added several art
+  entries per page. The standalone area test reads the letters' own
+  extent (x1.2). Both ADD entries: remap transcripts by block geometry,
+  and compare blocks, not just counts — a page can lose a phantom and gain
+  a balloon at the same count.
 
 ## Joined and compound balloons
 - Joined/overlapping balloons are SEPARATE entries, font-grouped; their
@@ -271,6 +305,14 @@ comic, page or round showed them.
   the new text prints over it. Put the edge THROUGH what is to be kept (a
   piece crossing the edge is excluded the same way) and check the job's
   block spans the whole line before fitting.
+- A COLOURED SOUND EFFECT OVER A BALLOON'S EDGE is inside the mask, so
+  the wipe takes it with the lettering. `{"keep": [[x0,y0,x1,y1], ...]}`
+  restores, after cleaning, the coloured ink inside each rectangle plus
+  the dark outline touching it and a few px of halo. Re-flooding the
+  balloon instead (a `lobes` rectangle) does not work there: the letters
+  welded to the outline fall outside the flood and stand under the new
+  text. Keep the rectangles off the lettering's rows — the restore is
+  pixels of the ORIGINAL page.
 - `"oval": true` on a `lobes` override is for an oval balloon whose outline
   has GAPS (a dashed whisper over pale art the walls cannot tell from the
   fill): the rectangle's flood runs out between the dashes into its
@@ -311,6 +353,23 @@ comic, page or round showed them.
 - `sibling_letter_box`: the FIT never writes over a sibling's lettering
   that a joined balloon's mask covers (else a first line prints on the
   sibling's last). The sibling's LETTERS inside the mask, not its block.
+- `letter_lobes` re-finds a compound entry's balloons from the lettering
+  also when (a) each paragraph's flood is a balloon of its OWN (an outline
+  between them) or (b) the mask has no waist, no distance-transform peaks
+  and is NOT convex (solidity < JOINED_SOLIDITY): balloons joined at a
+  notch, typically diagonal. Wrapped through the union instead, a line of
+  the first paragraph was set across the joint. One oval holding a pause
+  between paragraphs is convex and keeps its path.
+- A TAIL IS NOT A LEAK. `letter_lobes` refuses a flood that reaches its
+  window's edge, and a balloon's tail pointing well away runs out of a
+  60 px window — the pair was never split. On escape it retries once with
+  a wider window (LOBE_PAD_RETRY): a tail ends, a leak onto the page keeps
+  reaching the edge.
+- When per-lobe banding fails at a size, the whole-balloon fallback must
+  still keep each paragraph INSIDE ITS OWN BAND (`paras_in_bands`), or
+  the size steps down. Unchecked, a paragraph ran past the waist and its
+  last lines were wrapped into the neck a word a line, then into the
+  sibling's balloon.
 - THE JOINED-PAIR CUTS. Four faults, each of which leaves a lobe's first or
   last line outside every mask (never cleaned, the new text printed over
   it): (1) `cut_mask` must subtract the origin ON THE CUT'S AXIS —
@@ -372,6 +431,12 @@ comic, page or round showed them.
   Low in a balloon the fill splits into the body and the mouth of the tail;
   spanning that gap lets the wrap set its last lines out into the tail, hard
   against the outline.
+- A TAIL THAT JOINS THE BODY without a gap is still no writing area:
+  one edge turns and runs back out down the tail while the other keeps
+  closing, and the single run per row takes the tail's mouth as width.
+  `clip_tails` (single-paragraph balloons, not boxes) holds each edge to
+  its running extreme leaving the widest row — only where the OTHER edge
+  is still closing; both edges opening again is a waist.
 - `repair_letter_bites`' "sealed" test reads the window edge as outside, and
   the rim channel between the eroded mask and the outline runs down a TAIL
   and out of the window: every rim pocket then counts as a leak (a line end

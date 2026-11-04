@@ -96,6 +96,10 @@ FRAME_SOFT = 130        # a frame pixel scanned this light still walls the
                         # flood, where it TOUCHES true black (frame_wall)
 TAIL_APERTURE = 12      # px: an opening on the repair window's edge this
                         # narrow is a tail's rim channel, not a leak
+JOINED_SOLIDITY = 0.9   # a compound mask less convex than this (area over
+                        # hull) is balloons joined at a notch, not one oval
+LOBE_PAD_RETRY = 200    # px: letter_lobes' wider window when a flood
+                        # reaches the first one's edge (a tail, or a leak)
 FRAME_HELD = 0.85      # share of a frame's rows detection must cover, or
                         # the frame becomes the box (auto_caption_boxes)
 # two strips of ONE caption box are cut from the same rectangle, so their x
@@ -108,6 +112,7 @@ COLOUR_WALL = 55
 OVAL_SCALE = 0.98       # an "oval" lobe: its rectangle's ellipse, a hair inside
 SIBLING_MIN_LETTERS = 4  # a neighbour's letters inside a mask that make
                          # its text, not a stray piece (sibling_letter_box)
+KEEP_CHROMA = 40        # max - min channel: coloured ink, not lettering
 FILL_TREND_MIN = 8     # levels a fill must depart from its row level by
                         # before the repaint follows it (fill_trend)
 # a word shorter than this is never hyphenated: breaking it to buy a size or
@@ -864,6 +869,24 @@ def grow_lobes(fit, p, size, cap):
     return out if any(g[0] > size for g in out) else None
 
 
+def paras_in_bands(lines, lh, bands):
+    """Whether wrapped `lines` ([(y_top, ...)], paragraphs separated by
+    wrap_at's extra gap) put paragraph k inside band k's rows, give or take
+    a third of a line."""
+    paras, cur = [], [lines[0]]
+    for prev, ln in zip(lines, lines[1:]):
+        if ln[0] - prev[0] > 1.3 * lh:
+            paras.append(cur)
+            cur = []
+        cur.append(ln)
+    paras.append(cur)
+    if len(paras) != len(bands):
+        return False
+    slack = lh / 3.0
+    return all(ls[0][0] >= min(bd) - slack and ls[-1][0] + lh <= max(bd) + slack
+               for ls, bd in zip(paras, bands))
+
+
 def fit_lines(fit, p, size):
     """Wrap p's words at `size`. Two-paragraph bubbles whose mask has a real
     waist get each paragraph wrapped INSIDE its own lobe, centered on that
@@ -874,6 +897,7 @@ def fit_lines(fit, p, size):
     row span when building the layout entry)."""
     rows = p["rows"]
     nparas = len(p["paras"]) + 1
+    held = None         # bands the fallback below must keep paragraphs in
     if p["b"]["kind"] == "bubble" and nparas >= 2:
         bands, disjoint = lobe_bands(p)
         if bands is not None:
@@ -900,7 +924,11 @@ def fit_lines(fit, p, size):
             # ladder below rather than giving up: whole-block placement with
             # per-paragraph axes (para_line_axes) handles the lobes too, and
             # returning None here silently capped dense two-lobe balloons
-            # several px below what the anchors could place
+            # several px below what the anchors could place. But each
+            # paragraph must still land in ITS OWN lobe: let one run on
+            # past the waist and its last lines are wrapped into the narrow
+            # neck, a word a line, then on into the sibling's balloon
+            held = bands
     is_bubble = p["b"]["kind"] == "bubble"
     if is_bubble:
         # THE anchor: the ORIGINAL letterer's own text center (the detected
@@ -946,6 +974,8 @@ def fit_lines(fit, p, size):
                                 anchor=cxa, hold_cy=hold)
                 if lines is None or not block_centered(lines, rows, size,
                                                        cya + dy):
+                    continue
+                if held is not None and not paras_in_bands(lines, lh, held):
                     continue
                 if cxa is None and p.get("oaxis"):
                     # follow the original letterer's per-line axes
@@ -993,6 +1023,9 @@ def fit_lines(fit, p, size):
                                     p["hard"], para_breaks=p["paras"],
                                     anchor=None, hold_cy=True)
                     if lines is None:
+                        continue
+                    if held is not None and not paras_in_bands(lines, lh,
+                                                               held):
                         continue
                     out = []
                     for (y0, x0, x1, r) in lines:
@@ -1261,6 +1294,39 @@ def clear_page_edge(rows: dict, shape, pad: int) -> dict:
             if c - a > 8:
                 out[y] = (a, c)
     return out or rows
+
+
+def clip_tails(rows: dict, tol: int = 4) -> dict:
+    """The row profile without the mouth of a TAIL.
+
+    Leaving its widest row a balloon's edges only close in. Where the tail
+    leaves the body, one edge turns and runs back OUT down the tail while
+    the other keeps closing — and the profile, a single run per row, takes
+    the tail's mouth as writing width: the last line was set out into the
+    tail and across its outline. Each edge is held to its running extreme
+    (+ `tol`) moving away from the widest row, but only where the OTHER
+    edge is still closing: both edges opening again is a waist (a second
+    lobe), which is not this rule's to cut."""
+    ys = sorted(rows)
+    if len(ys) < 12:
+        return rows
+    x0 = np.array([rows[y][0] for y in ys], float)
+    x1 = np.array([rows[y][1] for y in ys], float)
+    k = int(np.argmax(x1 - x0))
+    c0, c1 = x0.copy(), x1.copy()
+    for rng in (range(k + 1, len(ys)), range(k - 1, -1, -1)):
+        lo, hi = x0[k], x1[k]
+        for i in rng:
+            lo, hi = max(lo, x0[i]), min(hi, x1[i])
+            c0[i], c1[i] = max(x0[i], lo - tol), min(x1[i], hi + tol)
+    out = {}
+    for i, y in enumerate(ys):
+        cut0, cut1 = c0[i] > x0[i], c1[i] < x1[i]
+        if cut0 and cut1:               # both edges open again: a waist
+            out[y] = rows[y]
+        elif c1[i] - c0[i] >= 12:
+            out[y] = (int(c0[i]), int(c1[i]))
+    return out
 
 
 def clip_rows(rows: dict, cy0: int) -> dict:
@@ -1613,7 +1679,18 @@ def geodesic_owner(region, seeds, nlab):
     return owner
 
 
-def letter_lobes(img, b, mask, n, others=(), paras=None):
+def mask_solidity(m):
+    """Area over convex-hull area of a mask's largest piece (1.0 = convex)."""
+    cs, _ = cv2.findContours(m.astype(np.uint8), cv2.RETR_EXTERNAL,
+                             cv2.CHAIN_APPROX_SIMPLE)
+    if not cs:
+        return 1.0
+    c = max(cs, key=cv2.contourArea)
+    hull = cv2.contourArea(cv2.convexHull(c))
+    return cv2.contourArea(c) / hull if hull else 1.0
+
+
+def letter_lobes(img, b, mask, n, others=(), paras=None, pad=60):
     """The balloon(s) of an entry, found from the ORIGINAL LETTERING.
 
     Detection returns two balloons side by side as one entry, and from the
@@ -1646,28 +1723,40 @@ def letter_lobes(img, b, mask, n, others=(), paras=None):
     H, W = img.shape[:2]
     bx, by, bw, bh = b["block"]
     mfill = fill_holes(mask > 0)
-    boxes = block_letters(img, b["block"], mfill, (x, y))
-    groups = letter_groups(boxes, n)
+    def paragraph_groups(boxes):
+        groups = letter_groups(boxes, n)
+        if groups is None:
+            return None
+        exts = [_extent(g) for g in groups]
+        groups = [groups[i] for i in reading_order(exts)]
+        # each group must be about as long as the paragraph it will carry:
+        # a transcript whose paragraphs are not this balloon's (1-100 b03
+        # repeats its neighbour's "ADELANTE:") would otherwise split one
+        # text in two
+        if paras is not None and len(paras) == n and n > 1:
+            dens = [len(g) / max(1, len(re.sub(r"[\s*]", "", t)))
+                    for g, t in zip(groups, paras)]
+            if max(dens) > 2.5 * min(dens):
+                return None
+        return groups
+
+    groups = paragraph_groups(block_letters(img, b["block"], mfill, (x, y)))
+    if groups is None and n > 1:
+        # the letters were bounded to detection's mask — the very thing
+        # that is wrong when it stops short of a balloon: the cut-off
+        # paragraph is left with a fraction of its letters and fails the
+        # length check. All the letters in the block, then.
+        groups = paragraph_groups(block_letters(img, b["block"]))
     if groups is None:
         return None
     exts = [_extent(g) for g in groups]
     beside = any(side_by_side(exts[i], exts[j])
                  for i in range(n) for j in range(i + 1, n))
-    groups = [groups[i] for i in reading_order(exts)]
-    exts = [_extent(g) for g in groups]
-    # each group must be about as long as the paragraph it will carry: a
-    # transcript whose paragraphs are not this balloon's (1-100 b03 repeats
-    # its neighbour's "ADELANTE:") would otherwise split one text in two
-    if paras is not None and len(paras) == n and n > 1:
-        dens = [len(g) / max(1, len(re.sub(r"[\s*]", "", t)))
-                for g, t in zip(groups, paras)]
-        if max(dens) > 2.5 * min(dens):
-            return None
     # the flood window: the entry AND its block (4-024 b05's block starts
     # 35px above a mask that lost its first line), and any neighbour whose
     # block reaches into it, plus room for a balloon the mask cut (a
     # balloon's arc can rise 30px past its first line: 4-024 b05's did)
-    P = 60
+    P = pad
     X0, Y0 = max(0, min(x, bx) - P), max(0, min(y, by) - P)
     X1 = min(W, max(x + w, bx + bw) + P)
     Y1 = min(H, max(y + h, by + bh) + P)
@@ -1741,6 +1830,14 @@ def letter_lobes(img, b, mask, n, others=(), paras=None):
         if ((xs.min() == 0 and X0 > 0) or (ys.min() == 0 and Y0 > 0)
                 or (xs.max() == inter.shape[1] - 1 and X1 < W)
                 or (ys.max() == inter.shape[0] - 1 and Y1 < H)):
+            # escaped — or a TAIL ran out of the window: the tail of a
+            # balloon pointing well away from it leaves any window this
+            # tight, and the pair was then never split (its text printed
+            # straight across both). A tail ends; a leak onto the page keeps
+            # reaching the edge of a wider window too.
+            if pad < LOBE_PAD_RETRY:
+                return letter_lobes(img, b, mask, n, others, paras,
+                                    pad=LOBE_PAD_RETRY)
             return None             # escaped: this is no balloon
         found |= inter
     # stacked lobes keep the waist cut — unless detection's mask LEAKED
@@ -1763,11 +1860,31 @@ def letter_lobes(img, b, mask, n, others=(), paras=None):
                        and mfill[ly + lh // 2 - y, lx + lw // 2 - x]))
     short = ((found & mwin).sum() < 0.6 * found.sum()
              and lost >= max(3, 0.15 * len(allb)))
+    # ...or each paragraph's flood is a balloon of its OWN: an outline
+    # walls them apart (one oval holding a pause between paragraphs gives
+    # the same flood from both)
+    apart = n >= 2 and all(
+        (floods[i] & floods[j]).sum()
+        < 0.5 * min(floods[i].sum(), floods[j].sum())
+        for i in range(n) for j in range(i + 1, n))
+    # ...or they are balloons JOINED with no outline between them that
+    # neither cut can separate: no waist in the row profile (diagonal lobes
+    # share rows), no distance-transform peaks — yet the shape is not one
+    # oval, it has a notch. Wrapped through the union as one block, a line
+    # of the first paragraph was set across the joint into the second
+    # balloon. (One oval holding a pause is convex, and keeps its path.)
+    joined = (n >= 2 and not beside and mask_solidity(mfill) < JOINED_SOLIDITY
+              and find_bands({y + ry: (x + int(xs[0]), x + int(xs[-1]) + 1)
+                              for ry in range(h)
+                              if len(xs := np.flatnonzero(mfill[ry]))},
+                             n) is None
+              and mask_lobes(mfill.astype(np.uint8), x, y, n) is None)
     if _DEBUG_LOBES:
         print(f"    letter_lobes n={n} beside={beside} "
               f"mask/found={mfill.sum() / max(1, inside):.2f} "
-              f"lost={lost}/{len(allb)} short={short}")
-    if not (beside or leaked or short):
+              f"lost={lost}/{len(allb)} short={short} apart={apart} "
+              f"joined={joined}")
+    if not (beside or leaked or short or apart or joined):
         return None
     out = np.zeros((h, w), np.uint8)
     lobes, jobs = [], []
@@ -2309,7 +2426,41 @@ def fill_trend(region, good):
     return np.clip(out + 0.5, 0, 255).astype(np.uint8)
 
 
+def keep_coloured(img, before, rects, chroma=KEEP_CHROMA, rim=6):
+    """Put back, inside each of `rects`, the coloured ink of `before` (the
+    page as it was before cleaning), with a `rim` of px round it — its own
+    outline and the halo it is drawn with. A coloured sound effect drawn
+    over a balloon's edge is inside its mask, and the cleaner wipes it with
+    the lettering; the lettering is near-neutral ink (max - min channel
+    under `chroma`), so it stays wiped."""
+    H, W = img.shape[:2]
+    for x0, y0, x1, y1 in rects:
+        x0, y0 = max(0, int(x0)), max(0, int(y0))
+        x1, y1 = min(W, int(x1)), min(H, int(y1))
+        if x1 <= x0 or y1 <= y0:
+            continue
+        reg = before[y0:y1, x0:x1].astype(np.int16)
+        col = ((reg.max(axis=2) - reg.min(axis=2)) >= chroma).astype(np.uint8)
+        # the effect's dark outline, where it touches the colour
+        dark = reg.max(axis=2) <= DARK_MAX
+        n, lab = cv2.connectedComponents(dark.astype(np.uint8), 8)
+        near = cv2.dilate(col, np.ones((5, 5), np.uint8)) > 0
+        touch = np.unique(lab[near & dark])
+        col = col.astype(bool) | np.isin(lab, touch[touch > 0])
+        col = cv2.dilate(col.astype(np.uint8),
+                         np.ones((2 * rim + 1, 2 * rim + 1), np.uint8)) > 0
+        img[y0:y1, x0:x1][col] = before[y0:y1, x0:x1][col]
+
+
 def clean_bubble(img, b, mask, allowed_ys=None):
+    if b.get("keep"):
+        # an override's `keep` rectangles: coloured art over the balloon
+        # that the wipe must not take (keep_coloured)
+        before = img.copy()
+        clean_bubble(img, {k: v for k, v in b.items() if k != "keep"},
+                     mask, allowed_ys)
+        keep_coloured(img, before, b["keep"])
+        return
     x, y, w, h = b["bbox"]
     region = img[y:y + h, x:x + w]
     if b["kind"] == "dark":
@@ -3309,6 +3460,8 @@ def prepare_bubble(stem, bi, b, img, texts, bubbles, cap_box, cap_mem):
     # with a box-sized bbox that crashed on p231 (shapes (198,264) vs
     # (108,233)).
     b_clean = b
+    if _ovm and _ovm.get("keep"):
+        b_clean = dict(b, keep=_ovm["keep"])
     if sole_box:
         _cx0, _cy0, _cx1, _cy1 = cap_box[bi]
         _ii = max(3, int(round(0.02 * (_cx1 - _cx0)))) + 3
@@ -3565,6 +3718,11 @@ def collect_page(path, transcripts, all_pending):
                 if rows_fit else rows_fit
             rows_raw = clear_page_edge(rows_raw, img.shape, _edge) \
                 if rows_raw else rows_raw
+            if "\n\n" not in text and bi not in cap_box:
+                # a single balloon: its tail's mouth is no writing area
+                rows = clip_tails(rows)
+                rows_fit = clip_tails(rows_fit) if rows_fit else rows_fit
+                rows_raw = clip_tails(rows_raw) if rows_raw else rows_raw
 
         # words with hard breaks (explicit \n) and paragraph breaks
         words, hard, paras = [], set(), set()

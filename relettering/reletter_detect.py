@@ -44,6 +44,8 @@ MIN_LETTERS = 8           # a real text block has at least this many blobs
 SPLIT_MIX = 0.2           # split_by_balloon: letters one balloon may stray
 SPLIT_HELD = 0.9          # ...and share of each block inside its balloon
 BOX_MIN_LETTERS = 5       # ...or this many inside a drawn caption frame
+SHORT_TWO_LINE_MIN = 5    # letter blobs a short two-line cluster of BIG
+                          # letters needs to be measured in its own lines
 PAD_FRAC = 0.03
 
 
@@ -715,8 +717,49 @@ def notch_cut(prof, lo, hi, a_end, b_start):
     return k
 
 
+def carve_rivals(comp, lb, own, rivals, origin):
+    """`comp` (a flood around the block `own`, in a window whose page origin
+    is `origin`, with `lb` the window's letter mask) minus the share of it
+    nearer ANOTHER block's lettering.
+
+    Two balloons joined with no outline between them are one free-space
+    component, so the flood from one block fills both. The row walk that
+    follows then sees each row span both balloons, and wherever the two
+    balloons' tops or bottoms differ the span's centre jumps and the walk
+    stops — inside the block, so the mask loses whole lines of its own text
+    (never cleaned, the new text printed over them), and the strict mask is
+    refused for under-covering the block. The seam between the two
+    letterings (`seam_split`, the merge stage's rule for diagonal lobes) is
+    where the artist joined them. Only lettering inside the flood counts: a
+    rival block elsewhere on the page changes nothing."""
+    ox, oy = origin
+    H, W = comp.shape
+
+    def rect(b):
+        x0, y0 = max(0, b[0] - ox), max(0, b[1] - oy)
+        x1, y1 = min(W, b[0] + b[2] - ox), min(H, b[1] + b[3] - oy)
+        m = np.zeros((H, W), bool)
+        if x1 > x0 and y1 > y0:
+            m[y0:y1, x0:x1] = True
+        return m
+
+    mine = rect(own)
+    theirs = np.zeros((H, W), bool)
+    for r in rivals:
+        theirs |= rect(r)
+    letters_in = (lb > 0) & (comp > 0)
+    seed_own = letters_in & mine & ~theirs
+    seed_riv = letters_in & theirs & ~mine
+    # a few stray pixels are a rival block grazing the flood's rim, not a
+    # balloon joined to this one
+    if seed_riv.sum() < 150 or not seed_own.any():
+        return comp
+    keep, _ = seam_split(comp, [seed_own, seed_riv])
+    return keep.astype(comp.dtype)
+
+
 def strict_bubble(img, letters, bx, by, bw, bh, gutter=None, luma=False,
-                  force_step=False):
+                  force_step=False, rivals=()):
     """Segment a bubble whose interior merges with a light background: use
     the bubble's own dark OUTLINE as the boundary — close small gaps in it,
     then take the free-space component around the text block. A caption box
@@ -728,7 +771,10 @@ def strict_bubble(img, letters, bx, by, bw, bh, gutter=None, luma=False,
     off by the panel edge opens white-into-white onto the gutter, which no
     outline or brightness step can stop. Returns (x, y, interior mask) or
     None when the region still leaks (touches the window edge or grows far
-    beyond the text block)."""
+    beyond the text block). `rivals`: the page's other text blocks — a
+    balloon joined to this one with no outline between them shares its
+    free space, and only this block's side of the seam is its own
+    (`carve_rivals`)."""
     h, w = img.shape[:2]
     win = 300
     wx0, wy0 = max(0, bx - win), max(0, by - win)
@@ -752,6 +798,12 @@ def strict_bubble(img, letters, bx, by, bw, bh, gutter=None, luma=False,
 
     def segment(barrier_max, use_gutter=True):
         barrier = (lkey <= barrier_max).astype(np.uint8)
+        # the LETTERS are not the wall: closed with the outline, a letter
+        # within a few px of it is welded on, stops being a hole, and the
+        # flood comes back with a bite out of its first and last lines —
+        # the row walk then stops at the bite, inside the block, and a
+        # balloon tight round big lettering is refused for its area
+        barrier[lb > 0] = 0
         if use_gutter and gutter is not None:
             barrier[gutter[wy0:wy1], :] = 1
         barrier = cv2.morphologyEx(barrier, cv2.MORPH_CLOSE,
@@ -815,6 +867,9 @@ def strict_bubble(img, letters, bx, by, bw, bh, gutter=None, luma=False,
                     for rr in range(r0, r1 + 1):
                         comp[rr] = span
 
+        if rivals:
+            comp = carve_rivals(comp, lb, (bx, by, bw, bh), rivals,
+                                (wx0, wy0))
         return follow_lobe(comp, by - wy0 + bh // 2,
                            (bx - wx0, bx - wx0 + bw), bw)
 
@@ -987,7 +1042,10 @@ def detect_page(path: Path):
             # using their own dark outline as the boundary.
             strict = (None if in_page_margin
                       else strict_bubble(img, letters, bx, by, bw, bh,
-                                         gutter))
+                                         gutter,
+                                         rivals=[q for q in pblocks
+                                                 if tuple(q) != (bx, by,
+                                                                 bw, bh)]))
             if strict is not None:
                 sx, sy, interior = strict
                 entries[("strict", bx // 50, by // 50)] = {
@@ -1166,7 +1224,18 @@ def detect_page(path: Path):
         # linework are thin lines that fill a fraction of their boxes), and
         # sitting in a lobe JOINED to an already-detected balloon (below)
         med_h = float(np.median(cst[1:, 3])) if cnt else 0.0
-        tall = bh > 60
+        # "tall" = more than two lines OF ITS OWN LETTERS (+ the join's
+        # margin): a fixed 60 px called two lines of big lettering three,
+        # and a free-standing two-line balloon was then refused for having
+        # no host balloon to be joined to. Only for a cluster that reads
+        # as lettering — several letters in solid strokes: at that height
+        # the paper scraps of art (hatching, a face's lines) pass too, two
+        # to four thin marks each
+        inked = (cst[1:, 4].sum()
+                 / max(1, (cst[1:, 2] * cst[1:, 3]).sum())) if cnt else 0.0
+        lettering = (cnt >= SHORT_TWO_LINE_MIN and inked >= 0.38
+                     and cst[1:, 4].sum() >= 0.2 * med_h * med_h * cnt)
+        tall = bh > (max(60, 2.5 * med_h + 8) if lettering else 60)
         if not (2 <= cnt and bw >= 30
                 and 12 <= bh <= max(60, 3 * 1.25 * med_h)):
             continue
@@ -1207,7 +1276,16 @@ def detect_page(path: Path):
             cx, cy, cw, ch = (int(v) for v in stats[lab][:4])
             edge = cx <= 0 or cy <= 0 or cx + cw >= w or cy + ch >= h
             area = int(stats[lab][4])
-            if not edge and 2 * bw * bh <= area <= 40 * bw * bh:
+            # the balloon's area against the LETTERS' own extent: the
+            # cluster box is the wide join's (45 px of dilation), and a
+            # balloon drawn tight round two short lines is ~1.4x its
+            # letters, which never reached twice that dilated box
+            lw = int((cst[1:, 0] + cst[1:, 2]).max() - cst[1:, 0].min())
+            lh = int((cst[1:, 1] + cst[1:, 3]).max() - cst[1:, 1].min())
+            larea = max(1, lw * lh)
+            if not edge and (2 * bw * bh <= area
+                             or 1.2 * larea <= area) \
+                    and area <= 40 * bw * bh:
                 # STANDALONE short bubble (a one-word reply): its own small
                 # closed white component around the cluster
                 comp_px = img[cy:cy + ch, cx:cx + cw][
@@ -1216,7 +1294,8 @@ def detect_page(path: Path):
                     walked = follow_lobe(filled_interior(lab),
                                          by - cy + bh // 2,
                                          (bx - cx, bx - cx + bw), bw)
-                    if walked is not None and walked.sum() >= 1.2 * bw * bh:
+                    if walked is not None and walked.sum() >= min(
+                            1.2 * bw * bh, 1.1 * larea):
                         entries[("mini", bx // 50, by // 50)] = {
                             "kind": "bubble", "strict": True,
                             "block": [bx, by, bw, bh],
@@ -1742,7 +1821,9 @@ def detect_page(path: Path):
         if e.get("group") is None and e.get("paragraphs", 1) == 1:
             continue
         ebx, eby, ebw, ebh = e["block"]
-        s = strict_bubble(img, letters, ebx, eby, ebw, ebh, gutter)
+        s = strict_bubble(img, letters, ebx, eby, ebw, ebh, gutter,
+                          rivals=[o["block"] for o in merged
+                                  if o is not e])
         if s is None:
             continue
         sx, sy, m = s
