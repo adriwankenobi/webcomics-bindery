@@ -89,11 +89,13 @@ for i in range(len(img.layers)):
 
 def template_geometry() -> dict:
     """Canvas size and guide boxes measured from template.xcf (cached; the
-    probe reruns whenever the template file changes)."""
+    probe reruns whenever the template file changes). Keyed on the file's
+    contents, not its mtime: git and copies do not keep mtimes, so an mtime
+    key re-probed on every clone and rewrote the tracked cache per machine."""
+    import hashlib
     import json
 
-    stat = TEMPLATE.stat()
-    key = [stat.st_mtime, stat.st_size]
+    key = hashlib.sha256(TEMPLATE.read_bytes()).hexdigest()
     if GEOMETRY_CACHE.is_file():
         cached = json.loads(GEOMETRY_CACHE.read_text())
         if cached.get("key") == key:
