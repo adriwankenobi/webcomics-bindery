@@ -7,6 +7,7 @@ pages over pipeline/upscaled/... and a layout.json for the GIMP text step."""
 import json
 import re
 import time
+import unicodedata
 from pathlib import Path
 
 import cv2
@@ -840,7 +841,7 @@ def fit_one_lobe(fit, p, bands, k, size):
     return [(y0, x0, x1, r, ax) for (y0, x0, x1, r) in lk]
 
 
-def grow_lobes(fit, p, size, cap):
+def grow_lobes(fit, p, size, cap, lobe_caps=None):
     """Raise each lobe to the largest size IT can host, never below `size`.
 
     Returns [(size, track, lines)] per lobe, or None when the bubble is not
@@ -853,7 +854,9 @@ def grow_lobes(fit, p, size, cap):
     out = []
     for k in range(len(bands)):
         best = None
-        for s2 in range(cap, size - 1, -1):
+        top = max(cap, lobe_caps[k]) if lobe_caps and k < len(lobe_caps) \
+            else cap
+        for s2 in range(top, size - 1, -1):
             for tr2 in track_steps(s2):
                 fit.track = tr2
                 lk = fit_one_lobe(fit, p, bands, k, s2)
@@ -885,6 +888,31 @@ def paras_in_bands(lines, lh, bands):
     slack = lh / 3.0
     return all(ls[0][0] >= min(bd) - slack and ls[-1][0] + lh <= max(bd) + slack
                for ls, bd in zip(paras, bands))
+
+
+def lobe_old_caps(img, b, bands):
+    """The ORIGINAL letterer's cap height in each lobe of a compound entry
+    (median letter-blob height of the block's ink inside the lobe's rows
+    and span). The entry's own cap height is the median over every lobe,
+    so a shout joined to an ordinary balloon was capped at the ordinary
+    size — the rule that shouts keep their size has to hold per lobe."""
+    bx, by, bw, bh = b["block"]
+    reg = img[by:by + bh, bx:bx + bw]
+    dark = orig_ink(reg, b["kind"]).astype(np.uint8)
+    n, _, st, _ = cv2.connectedComponentsWithStats(dark, 8)
+    out = []
+    for band in bands:
+        hs = []
+        for i in range(1, n):
+            x, y, w, h, a = st[i]
+            if not (9 <= h <= 48 and a >= 8):
+                continue
+            cy, cx = by + y + h // 2, bx + x + w // 2
+            sp = band.get(cy)
+            if sp and sp[0] <= cx < sp[1]:
+                hs.append(h)
+        out.append(float(np.median(hs)) if hs else 0.0)
+    return out
 
 
 def fit_lines(fit, p, size):
@@ -1525,16 +1553,26 @@ def _box_gap(a, c):
     return (dx * dx + dy * dy) ** 0.5
 
 
-def letter_groups(boxes, n):
+def letter_groups(boxes, n, paras=None):
     """Split letter boxes into `n` paragraphs at the widest gaps.
 
     A minimum spanning tree over the gaps between letters, cut at its
     longest edges — but only where both sides keep real lettering: a lone
     speck of ink far from the text is the longest edge of all, and cutting
     it off "splits" 2-030-2's two balloons into the whole text and one dot.
-    Specks then join the nearest group. Returns n lists of boxes, or None."""
+    Specks then join the nearest group. Returns n lists of boxes, or None.
+
+    `paras` (the transcript's paragraphs) scale that floor to the shortest
+    one: a two-letter reply beside a long speech has fewer letters than a
+    fixed share of the whole, could never be a group of its own, and the
+    cut fell inside the long speech instead. Never under two letters — a
+    lone speck is still no paragraph."""
     m = len(boxes)
     minsz = max(4, int(0.08 * m))
+    if paras is not None and len(paras) == n and n > 1:
+        lens = [len(re.sub(r"[\s*]", "", t)) for t in paras]
+        if sum(lens):
+            minsz = min(minsz, max(2, int(0.5 * m * min(lens) / sum(lens))))
     if m < n * minsz:
         return None
     edges = sorted((_box_gap(boxes[i], boxes[j]), i, j)
@@ -1724,7 +1762,7 @@ def letter_lobes(img, b, mask, n, others=(), paras=None, pad=60):
     bx, by, bw, bh = b["block"]
     mfill = fill_holes(mask > 0)
     def paragraph_groups(boxes):
-        groups = letter_groups(boxes, n)
+        groups = letter_groups(boxes, n, paras)
         if groups is None:
             return None
         exts = [_extent(g) for g in groups]
@@ -3671,6 +3709,26 @@ def prepare_bubble(stem, bi, b, img, texts, bubbles, cap_box, cap_mem):
             "jobs": jobs}
 
 
+def data_key(stem, keys):
+    """The spelling under which the comic's data (transcripts, layout)
+    knows the page `stem`. An accented name can be NFD on disk and NFC in
+    the JSON — the files were renamed by a copy between machines while the
+    data kept the spelling it was written with — and a raw lookup then
+    missed every such page without a word of warning beyond "no
+    transcripts"."""
+    if stem in keys:
+        return stem
+    want = unicodedata.normalize("NFC", stem)
+    for k in keys:
+        if unicodedata.normalize("NFC", k) == want:
+            return k
+    return stem
+
+
+# page path -> its data key, set by collect_page for typeset_page
+_DATA_KEYS = {}
+
+
 def collect_page(path, transcripts, all_pending):
     """Read one page's bubbles, prepare every entry with text and push
     the page onto `all_pending`. Returns early when the page has no
@@ -3682,7 +3740,8 @@ def collect_page(path, transcripts, all_pending):
     bubbles = json.loads(bpath.read_text())
     if not bubbles:
         return
-    texts = transcripts.get(path.stem)
+    key = _DATA_KEYS[path] = data_key(path.stem, transcripts)
+    texts = transcripts.get(key)
     if texts is None:
         print(f"  !! {path.stem}: {len(bubbles)} bubbles but no "
               f"transcripts — SKIPPED")
@@ -3882,7 +3941,17 @@ def typeset_page(fit, path, pending, clean_jobs, img, bubbles, book,
         # ones short of their own outline (p123's three bottom
         # balloons, one detection entry).
         per_line = None
-        grown = grow_lobes(fit, p, size, max(cap, ceiling))
+        lobe_caps = None
+        if (b["kind"] == "bubble" and p["paras"]
+                and not (ov and "size" in ov)):
+            # each lobe's own ceiling: a shout keeps ITS size even when the
+            # balloon joined to it is ordinary dialogue
+            _bands, _ = lobe_bands(p)
+            if _bands is not None:
+                lobe_caps = [min(MAX_SIZE, max(book, int(round(h / ratio))))
+                             if h else 0
+                             for h in lobe_old_caps(img, b, _bands)]
+        grown = grow_lobes(fit, p, size, max(cap, ceiling), lobe_caps)
         if grown:
             lines = [ln for _, _, lk in grown for ln in lk]
             per_line = [(gs, gt) for gs, gt, lk in grown for _ in lk]
@@ -3962,7 +4031,7 @@ def typeset_page(fit, path, pending, clean_jobs, img, bubbles, book,
     for q in pending:
         if q["bi"] in byi and q.get("flush") is not None:
             flush_left_lines(byi[q["bi"]], q["rows"], q["flush"])
-    layout[path.stem] = page_entries
+    layout[_DATA_KEYS.get(path, path.stem)] = page_entries
     # clean ONLY bubbles that got a layout entry (a fit failure must
     # never blank a bubble)
     changed = False
@@ -4047,7 +4116,7 @@ def main():
         BOOK_PIN = meta["book"]
         print(f"--add: fitting {len(todo)} pages at the book size "
               f"{BOOK_PIN}px")
-        paths = [q for q in paths if q.stem in todo]
+        paths = [q for q in paths if data_key(q.stem, todo) in todo]
     for path in paths:
         if path.stem in kept:
             continue

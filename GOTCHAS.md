@@ -36,6 +36,37 @@ comic, page or round showed them.
   NOT recomputed by a code change, and rewriting it makes every numbered
   page older than the plan, i.e. stale: keep the file's mtime and delete
   only the pages to regenerate.
+- DIGITS OF UNEQUAL HEIGHT are grouped apart (a "1" a few px shorter
+  than the "8" beside it); completing the number sideways gives each group
+  the number's width but its own height, and the shorter box left the
+  taller digit's top rows standing, which also held the crop open. Groups
+  of one polarity that overlap are merged (`_merge_overlapping`).
+- A MOSTLY FULL-BLEED ISSUE numbers only its margin pages, so its band
+  fails the "20% of the issue" vote. FOLIO_VOTE_MANY pages agreeing on
+  their own still make a band — but such an issue does not number every
+  page, so the over-art pass is skipped there: a mark in the band over art
+  is not one of its numbers.
+- A GREY NUMBER ON BLACK: a scan can print a page's white folio dim grey
+  on its black margin, the same tone as the stars and specks of a space
+  scene on black. Grey light marks never vote a band (a run of stars would
+  make one); they may only match the band the issue's white or dark
+  numbers voted, at the over-art pass's tight tolerances — and, unlike
+  that pass, also in an issue that numbers only a few pages, since they
+  stand on a plain margin, not on art.
+- A FOLIO PAGE'S BAND is judged against the bottom edge's OWN colour when
+  that edge is flat: with art bleeding off the top and sides the border's
+  median is the art's colour, and the white margin the number sat in read
+  as content down to the edge. Specks (components under ~(0.4% of the page)²)
+  go first: on a dusty scan they sit every few rows from the art to the
+  edge and no gap ever separates them. Folio pages only — a crop change
+  moves a fitted page, and those are KEPT, never re-upscaled silently.
+- FILE NAMES CHANGE UNICODE FORM between machines: a copy can turn every
+  accented name NFD while the JSON written earlier (folio cache,
+  transcripts, layout, numbers) keeps NFC. Opening a file still works
+  (APFS is form-insensitive), every dict lookup by file stem misses. The
+  folio cache compares in NFC (`_nfc`) — otherwise it is rebuilt on every
+  run with a fresh mtime and every numbered page reads as stale — and the
+  fit looks pages up under their data's own spelling (`data_key`).
 - A fitted book's upscaled/ pages ARE the cleaned working pages, so
   `cmd_upscale` KEEPS (prints `KEPT:`) any existing page whose expected
   upscale changed once layout.json exists — it used to re-upscale it in
@@ -220,6 +251,14 @@ comic, page or round showed them.
   extent (x1.2). Both ADD entries: remap transcripts by block geometry,
   and compare blocks, not just counts — a page can lose a phantom and gain
   a balloon at the same count.
+- A GRADED BOX WITH FUSED ITALIC LETTERS has two or three blobs for a
+  whole word, under BOX_MIN_LETTERS. The graded pass (which needs a drawn
+  frame anyway) counts a blob by its width in letters (`fused`,
+  FUSED_LETTER_W). It grows the box over every letter-sized-or-smaller ink
+  piece and the letters the paper pass took — over the fill and its own
+  letters only, a trailing "..." or a fused last letter stopped it short of
+  its frame, and the frame test refused it. Never use the fused count
+  where nothing else vouches for the text: art strokes pass for words.
 
 ## Joined and compound balloons
 - Joined/overlapping balloons are SEPARATE entries, font-grouped; their
@@ -370,6 +409,16 @@ comic, page or round showed them.
   the size steps down. Unchecked, a paragraph ran past the waist and its
   last lines were wrapped into the neck a word a line, then into the
   sibling's balloon.
+- `letter_groups`' floor (8% of the letters) can make a short reply beside
+  a long speech impossible as a group of its own; the cut then fell inside
+  the long speech. With the transcript's paragraphs known the floor scales
+  to the shortest one (never under two letters).
+- A SHOUT JOINED TO ORDINARY DIALOGUE keeps its own size: each lobe's size
+  ceiling is max(book, that lobe's own original cap height)
+  (`lobe_old_caps`); the entry's cap height is the median over all lobes.
+  A display word wider than the lobe still binds the size — breaking it
+  over more lines (a hard break in the transcript) trades width for the
+  lobe's height.
 - THE JOINED-PAIR CUTS. Four faults, each of which leaves a lobe's first or
   last line outside every mask (never cleaned, the new text printed over
   it): (1) `cut_mask` must subtract the origin ON THE CUT'S AXIS —

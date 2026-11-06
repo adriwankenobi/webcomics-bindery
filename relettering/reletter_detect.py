@@ -44,6 +44,8 @@ MIN_LETTERS = 8           # a real text block has at least this many blobs
 SPLIT_MIX = 0.2           # split_by_balloon: letters one balloon may stray
 SPLIT_HELD = 0.9          # ...and share of each block inside its balloon
 BOX_MIN_LETTERS = 5       # ...or this many inside a drawn caption frame
+FUSED_LETTER_W = 0.75     # a capital's width over its height, for counting
+                          # the letters in a fused blob
 SHORT_TWO_LINE_MIN = 5    # letter blobs a short two-line cluster of BIG
                           # letters needs to be measured in its own lines
 PAD_FRAC = 0.03
@@ -432,8 +434,15 @@ def flat_caption_boxes(img: np.ndarray) -> list:
 
 
 def paragraph_blocks(letters: np.ndarray,
-                     min_letters: int = MIN_LETTERS) -> list:
-    """Group letter blobs into paragraph blocks (dilate then components)."""
+                     min_letters: int = MIN_LETTERS,
+                     fused: bool = False) -> list:
+    """Group letter blobs into paragraph blocks (dilate then components).
+
+    `fused`: count a blob by how many letters wide it is (its width over
+    FUSED_LETTER_W of its height), not as one — italic lettering the
+    upscale fused into a few blobs per word. Only for a pass that has other
+    evidence than the count (the graded-box pass requires a drawn frame):
+    counted this way, art strokes pass for words."""
     joined = cv2.dilate(letters, np.ones((7, 25), np.uint8))
     joined = cv2.morphologyEx(joined, cv2.MORPH_CLOSE,
                               np.ones((21, 9), np.uint8))
@@ -441,8 +450,12 @@ def paragraph_blocks(letters: np.ndarray,
     blocks = []
     for i in range(1, n):
         x, y, w, h, _ = stats[i]
-        count = int(cv2.connectedComponentsWithStats(
-            letters[y:y + h, x:x + w], 8)[0]) - 1
+        k, _, st, _ = cv2.connectedComponentsWithStats(
+            letters[y:y + h, x:x + w], 8)
+        count = k - 1
+        if fused:
+            count = sum(max(1, int(st[j, 2] / (FUSED_LETTER_W * st[j, 3])))
+                        for j in range(1, k))
         if count >= min_letters and w >= 40 and h >= 14:
             blocks.append((x, y, w, h))
     return blocks
@@ -1583,10 +1596,21 @@ def detect_page(path: Path):
         if ring.mean() >= 0.5:
             gkeep[i] = True
     gletters = gkeep[tclabels].astype(np.uint8)
-    gb = gbg | (gletters > 0)
+    # every ink piece no bigger than a letter is part of the line too — the
+    # dots of a "...", accents, letters fused together that fail the ring
+    # test one by one: grown over only the fill and the letters that pass,
+    # a box stopped short of its frame at the end of its line, and the
+    # frame test then refused it. The frame is one long piece, so it still
+    # stops the growth. So do the letters the light-paper pass already
+    # took (the box's white end).
+    specks = np.zeros(ntc, bool)
+    specks[1:] = ((tcstats[1:, 3] <= LETTER_H[1])
+                  & (tcstats[1:, 2] <= LETTER_W_MAX))
+    gb = gbg | (gletters > 0) | specks[tclabels] | (letters > 0)
     frame = img.max(axis=2) <= 90
     for (bx, by, bw, bh) in paragraph_blocks(gletters,
-                                             min_letters=BOX_MIN_LETTERS):
+                                             min_letters=BOX_MIN_LETTERS,
+                                             fused=True):
         if any(min(bx + bw, e["bbox"][0] + e["bbox"][2])
                > max(bx, e["bbox"][0])
                and min(by + bh, e["bbox"][1] + e["bbox"][3])

@@ -79,9 +79,18 @@ fonttools). GIMP batch scripts run under GIMP 2.10's python-fu =
    interpolated, else a faint square shows), keeping anything far from it
    (a panel border); over artwork the patch is filled in from its edges.
    The plan is cached in `upscaled/<comic>/folios.json`, keyed on the
-   sources. Because erasing changes the crop, it changes `upscale_spec`'s
+   sources. Overlapping digit groups merge into one box; an issue
+   that numbers only a few pages (FOLIO_VOTE_MANY agreeing) gets a band but
+   no over-art pass. A light number duller than print white (grey on a
+   black margin) never votes, but may match the voted band tightly.
+   Names are compared in NFC. Because erasing changes
+   the crop, it changes `upscale_spec`'s
    target size: a book upscaled before this existed has every numbered
    page re-upscaled on its next run.
+   On a folio page the band under the art is measured against the bottom
+   edge's own colour when that edge is flat, with specks dropped
+   (`trim_folio_band`), so neither a white margin under full-bleed art nor
+   scan dust holds the crop open.
    The content box ignores the scan's EDGE STRIPES (`drop_edge_stripes`):
    a run of content columns or rows at most 1% of the page wide, touching
    the scan's edge, a real gap of paper away from the art (gutter shadow,
@@ -418,7 +427,7 @@ is exactly `spacing x (chars - 1)`, which is the model the fit wraps with.
 `max(book, original size)` (shouts keep their size); margin notes near
 their original (cap-height ratio measured from the font, never hardcoded);
 joined lobes size INDEPENDENTLY (`lobe_size_caps`), each filling its own
-balloon — they used to share the group's smallest maximum, faithful to the
+balloon and capped at max(book, ITS OWN original size) (`lobe_old_caps`) — they used to share the group's smallest maximum, faithful to the
 original letterer but leaving a pair visibly smaller than its neighbours;
 letting them differ is a deliberate policy call. `relax_group_caps` now only
 runs for groups that still share one size. A compound balloon returned as a

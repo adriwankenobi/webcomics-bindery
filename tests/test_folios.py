@@ -126,6 +126,42 @@ class Folios(unittest.TestCase):
         for p in pages[-3:]:
             self.assertIn(p.name, plan)
 
+    def test_overlapping_digit_groups_merge_into_one_box(self):
+        # a "1" a few px shorter than the "8" beside it is grouped apart from
+        # it; each group is widened over the whole number but keeps its own
+        # height, and the shorter box left the taller digit's top standing
+        groups = [{"box": (10, 4, 38, 21), "pol": "dark"},
+                  {"box": (11, 0, 39, 21), "pol": "dark"},
+                  {"box": (80, 2, 90, 21), "pol": "dark"},
+                  {"box": (12, 0, 30, 21), "pol": "light"}]
+        out = process._merge_overlapping(groups)
+        self.assertIn({"box": (10, 0, 39, 21), "pol": "dark"}, out)
+        self.assertIn({"box": (80, 2, 90, 21), "pol": "dark"}, out)
+        self.assertIn({"box": (12, 0, 30, 21), "pol": "light"}, out)
+        self.assertEqual(len(out), 3)
+
+    def test_a_band_many_pages_agree_on_is_kept_in_a_mostly_unnumbered_issue(
+            self):
+        # full-bleed art carries no number: only a few pages of the issue
+        # are numbered, all at the same height and position
+        pages = [self.save(f"Comic 9 - I {i:03d}.jpg", page(i + 2))
+                 for i in range(4, 13)]
+        art = Image.new("RGB", (W, H), (120, 150, 200))
+        pages += [self.save(f"Comic 9 - I {i:03d}.jpg", art)
+                  for i in range(13, 60)]
+        # ...and a number-shaped mark over the art in that band is not one:
+        # this issue does not number its full-bleed pages
+        im = art.copy()
+        dd = ImageDraw.Draw(im)
+        for k in range(-H, W, 9):               # busy artwork, not a margin
+            dd.line((k, H, k + H, 0), fill=(90, 110, 170), width=3)
+        ImageDraw.Draw(im).text((W // 2, int(H * 0.972)), "7", font=FONT,
+                                fill=(10, 10, 10), anchor="mm")
+        pages.append(self.save("Comic 9 - I 060.jpg", im))
+        plan, _ = process.find_folios(pages)
+        self.assertEqual(len(plan), 9)
+        self.assertNotIn("Comic 9 - I 060.jpg", plan)
+
     def test_spreads_carry_one_number_under_each_half(self):
         pages = [self.save(f"Comic 4 - D {i:03d}.jpg", page(i + 2))
                  for i in range(4, 10)]
@@ -150,6 +186,27 @@ class Folios(unittest.TestCase):
         self.assertLessEqual(out[int(H * 0.96):, W // 2 - 80:W // 2 + 80].max(),
                              12)
 
+    def test_a_grey_number_on_black_matches_the_issues_band(self):
+        # the scan printed this page's white number dim grey on its black
+        # margin: it is the issue's number all the same
+        pages = [self.save(f"Comic 6 - F {i:03d}.jpg", page(i + 2))
+                 for i in range(4, 12)]
+        pages.append(self.save("Comic 6 - F 012.jpg",
+                               page(14, ink=(145, 145, 145), band=(0, 0, 0))))
+        plan, _ = process.find_folios(pages)
+        self.assertEqual(len(plan), len(pages))
+        self.assertEqual(plan[pages[-1].name][0]["pol"], "light")
+
+    def test_grey_marks_on_black_never_vote_a_band(self):
+        # stars of a space scene, one in the folio band of every page: as
+        # bright as a dim number, but not white
+        pages = [self.save(f"Comic 7 - G {i:03d}.jpg",
+                           page(i + 2, ink=(145, 145, 145), band=(0, 0, 0)))
+                 for i in range(4, 12)]
+        plan, report = process.find_folios(pages)
+        self.assertEqual(plan, {})
+        self.assertEqual(report, [])
+
 
 class FolioBandTrim(unittest.TestCase):
     """After the folio is erased, scan dust left in its band must not hold
@@ -170,6 +227,28 @@ class FolioBandTrim(unittest.TestCase):
         self.assertEqual(cropped.height, H - 60 - 5)      # held open
         out = process.trim_folio_band(cropped, im)
         self.assertLessEqual(out.height, int(H * 0.94) - 60 + 2)
+
+    def test_dust_scattered_down_the_band_is_trimmed(self):
+        # specks every few rows from the art down to the edge chain into one
+        # run of "content" rows with no real gap anywhere
+        im = self._erased([(100 + 37 * k, int(H * 0.94) + 4 + 9 * k)
+                           for k in range(int(H * 0.06) // 9)])
+        out = process.trim_folio_band(process.crop_to_content(im), im)
+        self.assertLessEqual(out.height, int(H * 0.94) - 60 + 2)
+
+    def test_white_margin_under_full_bleed_art_is_trimmed(self):
+        # art to the top and side edges: the border's median is the ART's
+        # colour, so the white band the folio sat in read as content
+        im = Image.new("RGB", (W, H), (255, 255, 255))
+        d = ImageDraw.Draw(im)
+        d.rectangle((0, 0, W // 2, int(H * 0.94)), fill=(150, 60, 40))
+        d.rectangle((W // 2, 0, W, int(H * 0.94)), fill=(40, 70, 160))
+        d.line((0, int(H * 0.94), W, int(H * 0.94)), fill=(0, 0, 0), width=4)
+        cropped = process.crop_to_content(im)
+        self.assertEqual(cropped.height, H)                 # held open
+        out = process.trim_folio_band(cropped, im)
+        self.assertLessEqual(out.height, int(H * 0.94) + 4)
+        self.assertGreaterEqual(out.height, int(H * 0.94))
 
     def test_dust_outside_the_cropped_columns_is_trimmed(self):
         im = self._erased([(0, H - 4)])
@@ -275,3 +354,47 @@ class ReletteredPagesKeepTheirUpscale(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FolioCacheNames(unittest.TestCase):
+    """The same accented file name can be NFD on disk and NFC in the cache
+    (or the reverse) once a book is copied between machines: the cache must
+    still match, or the plan is recomputed and rewritten on every run and
+    every numbered page reads as older than it."""
+
+    def test_cache_matches_across_unicode_forms(self):
+        import json
+        import unicodedata
+        with tempfile.TemporaryDirectory() as d:
+            comic = Path(d) / "Comic 10 - J"
+            cache_dir = Path(d) / "cache"
+            comic.mkdir()
+            cache_dir.mkdir()
+            nfd = unicodedata.normalize("NFD", "Comic 10 - Jóvenes 004.jpg")
+            p = comic / nfd
+            page(6).save(p, quality=95)
+            st = p.stat()
+            nfc = unicodedata.normalize("NFC", nfd)
+            cached = {"version": process.FOLIO_VERSION,
+                      "sources": {nfc: [st.st_size, int(st.st_mtime)]},
+                      "pages": {nfc: [{"box": [1, 2, 3, 4], "pol": "dark",
+                                       "art": False}]},
+                      "report": []}
+            (cache_dir / process.FOLIO_CACHE).write_text(json.dumps(cached))
+            process._FOLIO_PLANS.pop(comic, None)
+            plan = process.folio_plan(comic, cache_dir)
+            self.assertEqual(plan[nfc][0]["box"], [1, 2, 3, 4])
+            self.assertEqual(plan.get(process._nfc(nfd)), plan[nfc])
+
+
+class ComposeRenumbering(unittest.TestCase):
+    def test_manifest_in_the_other_unicode_form_is_not_a_renumbering(self):
+        import unicodedata
+        nfc = unicodedata.normalize("NFC", "Comic 11 - Señal 004.jpg")
+        nfd = unicodedata.normalize("NFD", nfc)
+        files = [Path(nfd), Path("Comic 11 - Plain 005.jpg")]
+        numbers = {nfd: 4, "Comic 11 - Plain 005.jpg": 5}
+        old = {nfc: 4, "Comic 11 - Plain 005.jpg": 6}
+        self.assertEqual([f.name for f in process.renumbered(files, numbers,
+                                                             old)],
+                         ["Comic 11 - Plain 005.jpg"])

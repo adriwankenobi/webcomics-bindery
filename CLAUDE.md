@@ -120,7 +120,8 @@ topic's section of GOTCHAS.md. Key facts a session needs:
   image: every image there is a page. Its tests skip under .venv.
 - GIMP batch = GIMP 2.10 python-fu = **Python 2**: no f-strings, encode
   UTF-8 before pdb text calls. `gimp` is not on PATH — use
-  /Applications/GIMP-2.10.app/Contents/MacOS/gimp.
+  /Applications/GIMP-2.10.app/Contents/MacOS/gimp (or GIMP.app, whichever
+  the installer made; process.py takes either).
 - Fonts are USER-SUPPLIED and LICENSED — never commit font files. The fit
   reads relettering/fonts/regular.ttf + bolditalic.ttf; the same font must
   be installed system-wide (~/Library/Fonts) for GIMP, whose family names

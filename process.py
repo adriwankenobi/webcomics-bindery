@@ -31,7 +31,11 @@ from PIL import Image
 
 REPO = Path(__file__).resolve().parent
 TEMPLATE = REPO / "template.xcf"
-GIMP = "/Applications/GIMP-2.10.app/Contents/MacOS/gimp"
+# GIMP 2.10 (python-fu = Python 2); its installer names the app either way
+GIMP = next((g for g in ("/Applications/GIMP-2.10.app/Contents/MacOS/gimp",
+                         "/Applications/GIMP.app/Contents/MacOS/gimp")
+             if Path(g).is_file()),
+            "/Applications/GIMP-2.10.app/Contents/MacOS/gimp")
 UPSCALE_URL = "https://www.iloveimg.com/upscale-image"
 REALESRGAN = REPO / "tools" / "realesrgan" / "realesrgan-ncnn-vulkan"
 # line-art model: keeps lettering intact AND is color-faithful
@@ -465,7 +469,14 @@ def trim_folio_band(cropped: Image.Image, page: Image.Image,
     tall and its art printed several % smaller than its neighbours'. Below a
     real gap, a run of rows holding less ink than `speck_rows` full lines is
     dust, and so are empty rows. Bottom edge only, folio pages only: that is
-    where the folio was, and the rest of every page is as approved."""
+    where the folio was, and the rest of every page is as approved.
+
+    The band is judged against its OWN colour when the scan's bottom edge
+    is flat: with art bleeding off the top and sides, the border's median
+    is the art's colour, and the white margin the folio sat in read as
+    content all the way down. Specks (components under SPECK_AREA) are
+    dropped first: on a dusty scan they sit every few rows from the art to
+    the edge, so no gap ever separates them from it."""
     import numpy as np
     a = np.asarray(cropped.convert("RGB"), dtype=np.int16)
     h, w = a.shape[:2]
@@ -474,7 +485,15 @@ def trim_folio_band(cropped: Image.Image, page: Image.Image,
     paper = np.median(np.concatenate(
         [b[:ring].reshape(-1, 3), b[-ring:].reshape(-1, 3),
          b[:, :ring].reshape(-1, 3), b[:, -ring:].reshape(-1, 3)]), axis=0)
+    edge_band = b[-ring:].reshape(-1, 3)
+    edge = np.median(edge_band, axis=0)
+    if (np.abs(edge_band - edge).max(axis=1) <= tolerance).mean() >= 0.95:
+        paper = edge
     mask = np.abs(a - paper).max(axis=2) > tolerance
+    speck = max(8, round((0.004 * min(b.shape[:2])) ** 2))
+    for ys, xs in _label(mask):
+        if len(ys) < speck:
+            mask[ys, xs] = False
     idx = np.flatnonzero(mask.mean(axis=1) > min_frac)
     if not len(idx):
         return cropped
@@ -580,6 +599,8 @@ FOLIO_TOP = 0.92            # folios sit below this fraction of page height
 FOLIO_H = (0.007, 0.018)    # digit height range, fraction of page height
 FOLIO_CONTRAST = 60         # ink vs local background (luma)
 FOLIO_VOTE = (3, 0.2)       # pages that must agree: at least N and this share
+FOLIO_VOTE_MANY = 8         # ...or this many on their own (mostly full-bleed
+                            # issues number only a few pages)
 FOLIO_CACHE = "folios.json"
 FOLIO_VERSION = 1
 
@@ -743,15 +764,42 @@ def _digit_groups(rgb, page_h: int, strict: bool) -> list:
             # even with a bit of art reaching into one edge
             plain = (float((np.abs(ring - np.median(ring, axis=0)).max(axis=1)
                             <= 24).mean()) if len(ring) else 0.0)
+            # light folios are printed white; a GREY one (a scan whose white
+            # came out dim on a black margin) looks just like the stars and
+            # specks of a space scene, so it may only match a band the
+            # issue's white or dark numbers voted — never vote one itself
+            grey = False
             if strict:
                 if stray > 0.05 * gh * gh or plain < 0.85:
                     continue
-                if pol == "light" and tone < 160:
-                    continue    # light folios are printed white
+                grey = pol == "light" and tone < 160
             elif not all((m["lum"] <= 70 if pol == "dark" else m["lum"] >= 200)
                          and m["fill"] >= 0.25 for m in members):
                 continue
-            out.append({"box": (x0, y0, x1, y1), "pol": pol})
+            out.append({"box": (x0, y0, x1, y1), "pol": pol, "grey": grey})
+    return out
+
+
+def _merge_overlapping(groups: list) -> list:
+    """Digit groups of one polarity whose boxes overlap, as their union.
+
+    Digits only group when their heights agree, so a "1" a few px shorter
+    than the "8" beside it starts a group of its own; completing the number
+    sideways then gives both groups the whole number's width but each its
+    own height, and the pick could take the shorter box — erasing it left
+    the taller digit's top rows standing, which also held the crop open."""
+    out = []
+    for g in groups:
+        x0, y0, x1, y1 = g["box"]
+        for o in out:
+            a0, b0, a1, b1 = o["box"]
+            if (o["pol"] == g["pol"] and x0 < a1 and a0 < x1
+                    and y0 < b1 and b0 < y1):
+                o["box"] = (min(x0, a0), min(y0, b0), max(x1, a1),
+                            max(y1, b1))
+                break
+        else:
+            out.append(dict(g, box=tuple(g["box"])))
     return out
 
 
@@ -768,10 +816,12 @@ def folio_candidates(im: Image.Image, strict: bool) -> list:
     found = []
     for want, f0, f1 in windows:
         x0 = int(w * f0)
-        for g in _digit_groups(a[top:, x0:int(w * f1)], h, strict):
+        for g in _merge_overlapping(
+                _digit_groups(a[top:, x0:int(w * f1)], h, strict)):
             bx0, by0, bx1, by1 = g["box"]
             box = [x0 + bx0, top + by0, x0 + bx1, top + by1]
             found.append({"box": [int(v) for v in box], "pol": g["pol"],
+                          "grey": g.get("grey", False),
                           "want": want, "cx": (box[0] + box[2]) / 2 / w,
                           "cy": (box[1] + box[3]) / 2 / h,
                           "hf": (box[3] - box[1]) / h})
@@ -826,7 +876,7 @@ def find_folios(pages: list) -> tuple:
         # the vote is tighter than the per-page match: a real folio band
         # agrees within a few % of height and ~1% of position
         allc = [g for cs in strict.values() for g in cs
-                if abs(g["cx"] - g["want"]) <= 0.03]
+                if abs(g["cx"] - g["want"]) <= 0.03 and not g["grey"]]
         best, best_pages = [], 0
         for g in allc:
             agree = [o for o in allc if abs(o["hf"] - g["hf"]) <= 0.1 * g["hf"]
@@ -835,11 +885,16 @@ def find_folios(pages: list) -> tuple:
             n = sum(1 for cs in strict.values() if any(id(o) in ids for o in cs))
             if n > best_pages:
                 best, best_pages = agree, n
-        if best_pages < max(FOLIO_VOTE[0], FOLIO_VOTE[1] * len(files)):
+        # numbered on only a few pages (the rest full-bleed art): the band
+        # stands on how many agree, but the issue does not number EVERY
+        # page, so a mark over art in the band is not one of its numbers
+        few = best_pages < max(FOLIO_VOTE[0], FOLIO_VOTE[1] * len(files))
+        if few and best_pages < FOLIO_VOTE_MANY:
             continue
         band = (float(np.median([g["cy"] for g in best])),
                 float(np.median([g["hf"] for g in best])))
-        picked = {p: _folio_pick(strict[p], band) for p in files}
+        picked = {p: _folio_pick([g for g in strict[p] if not g["grey"]],
+                                 band) for p in files}
         sides = defaultdict(list)
         for p, gs in picked.items():
             sides[_folio_parity(p.stem)] += [g["cx"] for g in gs
@@ -849,7 +904,11 @@ def find_folios(pages: list) -> tuple:
         on_art = []
         for p in files:
             gs, art = picked[p], False
-            if not gs:
+            if not gs:          # a grey number: held to the art pass's tolerances
+                gs = _folio_pick([g for g in strict[p] if g["grey"]], band,
+                                 want.get(_folio_parity(p.stem)),
+                                 cx_tol=0.015, hf_tol=0.08)
+            if not gs and not few:
                 with Image.open(p) as im:
                     gs = _folio_pick(folio_candidates(im, False), band,
                                      want.get(_folio_parity(p.stem)),
@@ -952,6 +1011,16 @@ def erase_folios(im: Image.Image, folios: list) -> Image.Image:
 _FOLIO_PLANS = {}
 
 
+def _nfc(name: str) -> str:
+    """A file name in one Unicode form. The same accented name comes back
+    NFD from one file system or copy tool and NFC from another, and a cache
+    keyed on the raw spelling never matches after the book moves: the folio
+    plan was recomputed on every run, rewritten with a fresh mtime, and every
+    numbered page then read as older than its plan."""
+    import unicodedata
+    return unicodedata.normalize("NFC", name)
+
+
 def folio_plan(comic_dir: Path, cache_dir: Path = None) -> dict:
     """{source filename: folios} for a comic, computed once and cached in
     upscaled/<comic>/folios.json (keyed on every story source's size and
@@ -962,13 +1031,16 @@ def folio_plan(comic_dir: Path, cache_dir: Path = None) -> dict:
         return _FOLIO_PLANS[comic_dir]
     cache_dir = cache_dir or REPO / "upscaled" / comic_dir.name
     pages = [p for p in image_files(comic_dir) if "cover" not in p.stem.lower()]
-    key = {p.name: [p.stat().st_size, int(p.stat().st_mtime)] for p in pages}
+    key = {_nfc(p.name): [p.stat().st_size, int(p.stat().st_mtime)]
+           for p in pages}
     cache = cache_dir / FOLIO_CACHE
     try:
         cached = json.loads(cache.read_text())
-        if cached.get("version") == FOLIO_VERSION and cached["sources"] == key:
-            _FOLIO_PLANS[comic_dir] = cached["pages"]
-            return cached["pages"]
+        if (cached.get("version") == FOLIO_VERSION
+                and {_nfc(k): v for k, v in cached["sources"].items()} == key):
+            plan = {_nfc(k): v for k, v in cached["pages"].items()}
+            _FOLIO_PLANS[comic_dir] = plan
+            return plan
     except (OSError, ValueError, KeyError):
         pass
     print(f"Looking for the sources' own page numbers ({len(pages)} pages)...",
@@ -979,6 +1051,7 @@ def folio_plan(comic_dir: Path, cache_dir: Path = None) -> dict:
     cache.write_text(json.dumps({"version": FOLIO_VERSION, "sources": key,
                                  "pages": plan, "report": report},
                                 ensure_ascii=False, indent=0))
+    plan = {_nfc(k): v for k, v in plan.items()}
     _FOLIO_PLANS[comic_dir] = plan
     return plan
 
@@ -998,7 +1071,7 @@ def upscale_spec(src: Path) -> dict:
     elif img.height > img.width and is_index_page(src):
         box, note, is_cover = canvas_size(), ", index: full canvas", False
     else:
-        folios = folio_plan(src.parent).get(src.name, [])
+        folios = folio_plan(src.parent).get(_nfc(src.name), [])
         img = erase_folios(img, folios)
         cropped = crop_to_content(img)
         if folios:
@@ -1084,7 +1157,7 @@ def cmd_upscale(comic_dir: Path, out_dir: Path, engine: str = "realesrgan",
         # An output older than the folio plan that erases something on it
         # predates the erasure.
         cache = out_dir / FOLIO_CACHE
-        if (folio_plan(p.parent).get(p.name) and cache.is_file()
+        if (folio_plan(p.parent).get(_nfc(p.name)) and cache.is_file()
                 and any(done[s].stat().st_mtime < cache.stat().st_mtime
                         for s in outs if s in done)):
             return False
@@ -1336,6 +1409,16 @@ def run_gimp_plugin(call: str) -> list:
     return [l for l in lines if l.startswith(("COMPOSE", "ERROR"))]
 
 
+def renumbered(files, numbers: dict, old: dict) -> list:
+    """The pages whose number differs from the last compose's manifest
+    (`old`), compared in one Unicode form: a manifest written before the
+    files were renamed NFD (a copy between machines) matched no accented
+    page, and every one was deleted and recomposed — losing its text
+    layers."""
+    old = {_nfc(k): v for k, v in old.items()}
+    return [f for f in files if old.get(_nfc(f.name)) != numbers.get(f.name)]
+
+
 def cmd_compose(in_dir: Path, xcf_dir: Path, pdf_dir: Path,
                 comic_dir: Path) -> int:
     if not TEMPLATE.is_file():
@@ -1354,7 +1437,7 @@ def cmd_compose(in_dir: Path, xcf_dir: Path, pdf_dir: Path,
     # been numbered) must be recomposed
     manifest_path = xcf_dir / "numbers.json"
     old = json.loads(manifest_path.read_text()) if manifest_path.is_file() else {}
-    stale = [f for f in files if old.get(f.name) != numbers.get(f.name)]
+    stale = renumbered(files, numbers, old)
     if stale:
         print(f"{len(stale)} pages need (re)numbering")
         for f in stale:

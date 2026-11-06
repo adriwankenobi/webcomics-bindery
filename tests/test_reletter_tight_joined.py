@@ -161,3 +161,20 @@ class FitShapes(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(HAVE_CV2, "cv2 only in .venv-reletter")
+class DataKeys(unittest.TestCase):
+    """A page whose file name is NFD on disk is found under the NFC key its
+    transcripts were written with, and the other way round."""
+
+    def test_either_unicode_form_finds_the_data(self):
+        import unicodedata
+        fit = load("reletter_fit")
+        nfc = unicodedata.normalize("NFC", "Series 13 - Título 012")
+        nfd = unicodedata.normalize("NFD", nfc)
+        self.assertNotEqual(nfc, nfd)
+        self.assertEqual(fit.data_key(nfd, {nfc: []}), nfc)
+        self.assertEqual(fit.data_key(nfc, {nfd: []}), nfd)
+        self.assertEqual(fit.data_key("Series 13 - Other 001", {nfc: []}),
+                         "Series 13 - Other 001")
