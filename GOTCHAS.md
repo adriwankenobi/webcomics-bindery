@@ -66,7 +66,11 @@ comic, page or round showed them.
   (APFS is form-insensitive), every dict lookup by file stem misses. The
   folio cache compares in NFC (`_nfc`) — otherwise it is rebuilt on every
   run with a fresh mtime and every numbered page reads as stale — and the
-  fit looks pages up under their data's own spelling (`data_key`).
+  fit looks pages up under their data's own spelling (`data_key`). Every
+  "which pages are done" test compares NFC too (`pending_add`,
+  `stems_to_add`, `merge_layout`): a raw one sent every accented page to
+  `--add`, which re-fitted pages already laid out and wrote them in a
+  second time under the other spelling.
 - A fitted book's upscaled/ pages ARE the cleaned working pages, so
   `cmd_upscale` KEEPS (prints `KEPT:`) any existing page whose expected
   upscale changed once layout.json exists — it used to re-upscale it in
@@ -79,6 +83,32 @@ comic, page or round showed them.
   override in untracked `upscaled/<comic>/paper_overrides.json`
   ({source filename: [r,g,b]}), read when compose writes numbers.txt —
   delete the page's .xcf/.pdf to recompose it.
+
+- A PAGE PRINTED ON BLACK is not an art page: `paper_page_kind`'s ink
+  test assumes light paper, and on black every paper row reads as ink, so
+  story pages came back "art" — no page number, skipped by detection, never
+  re-lettered. Dark paper (luma under the ink threshold) is a regular page;
+  detection's copy of the rule must agree.
+- A PHOTOGRAPHED OPEN BOOK defeats the content crop: the black page margin,
+  the spine's shadow and the facing page's edge are all content to it.
+  Per-page editor settings live in untracked
+  `upscaled/<comic>/upscale_overrides.json` ({filename or fnmatch pattern:
+  {crop, rotate, model, levels}}; the exact name wins per field): `crop` in
+  source px replaces the content crop, `rotate` deskews first, `model`
+  picks the Real-ESRGAN model (the anime model turns a grainy scan of
+  flat-colour art back into flat colour), `levels` stretches a greyed scan
+  per channel (capped) before the AI pass. Same rebuild rules as any crop
+  change on a fitted page.
+- `levels` MOVES PALE FILLS ONTO THE LIGHT/TINT LINE: the per-channel
+  black point lifts the weakest channel of a pale-blue caption box from
+  well over LIGHT_MIN to right on it. Noise then puts half of every
+  letter's ring on each side, the paper-letter pass and the tinted-box pass
+  each see half a ring, and the box vanishes from detection (its old
+  transcript has no entry left to land on). Re-detect after a `levels`
+  re-upscale and look for GONE texts. Widening the tint ground to pale
+  coloured fills just over the line found these boxes but moved two dozen
+  pages book-wide, approved ones included — refused; such a box is a
+  per-comic hand entry.
 
 ## Rebuilding approved pages
 - REBUILDING AN APPROVED PAGE IS NOT A RE-FIT. A subset promote keeps
@@ -161,6 +191,28 @@ comic, page or round showed them.
   from the mask being replaced, bounded to the lobe's own block. And drop
   mask DEBRIS before cropping: slivers of a ceded sibling's rim, a percent
   or two of the mask, can hold the bbox far taller than its own balloon.
+- MIXED-CASE LETTERING SET LARGE splits its balloons: a line of
+  x-height-only words starts an ascender's height lower than a capital
+  would, so its gap from the line above runs past paragraph_blocks'
+  vertical join — two entries in one balloon, or a short last line left to
+  the short-utterance pass as an entry of its own. `stacked_blocks` joins
+  fragments (any letter count) that are stacked, overlapping, at most about
+  a letter height apart, on the SAME light component with only its fill
+  between them; the letter count is judged on the joined block. Two
+  balloons, however close, are two components. Widening the join itself
+  would fuse neighbouring balloons on every page.
+- A STRAY MARK JUST OUTSIDE A BALLOON (a ship in the sky beside the text)
+  joins the block; with one balloon in it, split_by_balloon used to keep
+  the block whole, the bubble was then picked from the art around the mark,
+  the strict flood leaked into the sky and the clean would wipe the mark as
+  a letter. `trim_strays`: letters voting for another light component, too
+  few for a balloon, outside the balloon's box, leave the block (the
+  original block stays claimed, so the short pass does not take them).
+- PROMOTE MATCHES PAGES IN NFC: a subset re-fit names pages as the file
+  system spells them, the layout as it was written; a raw compare added an
+  accented page a second time instead of replacing it, and which of the
+  two the GIMP pass then used was an accident. The merged entry keeps the
+  layout's spelling.
 - Detection changes are only safe while the bubble COUNT per page holds —
   the transcripts are positional. Re-detect into a scratch compare first and
   REFUSE any page whose count moved. Widening `letter_mask` to accept tinted
@@ -247,7 +299,10 @@ comic, page or round showed them.
   that reads as lettering (>= SHORT_TWO_LINE_MIN blobs, solid strokes,
   ink for its letter size): at that height the paper scraps of artwork
   pass too, 2-4 thin marks each, and unguarded it added several art
-  entries per page. The standalone area test reads the letters' own
+  entries per page. The solid-stroke bar is ONE value (0.30) for every
+  count: a big, round, thin-stroked font fills ~0.31 of its boxes, and a
+  higher bar for clusters under MIN_LETTERS refused a free-standing
+  two-line reply; the 2-4 marks are already refused by the blob count. The standalone area test reads the letters' own
   extent (x1.2). Both ADD entries: remap transcripts by block geometry,
   and compare blocks, not just counts — a page can lose a phantom and gain
   a balloon at the same count.
@@ -534,6 +589,21 @@ comic, page or round showed them.
   block AND inside the balloon's own fill (`solid`): bounded to the block
   alone it catches artwork through a leaked mask and paints white
   rectangles.
+- ...which leaves the COUNTERS of a line welded to the balloon's edge: that
+  line sits in a bite, so its counters are neither fill nor holes in it,
+  the soft cut-off never reaches their pale rims, and each O printed as a
+  faint dotted ring once its letter was wiped. A letter-sized hole the
+  wiped ink itself encloses is that letter's counter and is repainted with
+  it.
+- A BALLOON WITH NO OUTLINE on a dark panel: a letter touching its edge
+  joins the panel, so it is outside the mask, and the overflow pass cannot
+  take it either (its component is the whole panel, not letter-sized). Its
+  stub survives the wipe. No cleaning rule separates it from the panel —
+  that is an art edit on pristine/ AND upscaled/, scripted per book so a
+  re-upscale can replay it. The same holds for letters CUT BY THE PAGE
+  EDGE (a balloon running off a tightly cropped page): the overflow pass
+  skips a blob touching its window border, and there the border is the
+  page.
 - THE PER-BUBBLE PREP HAS ONE HOME: `prepare_bubble` (with
   `page_caption_boxes` / `boxes_to_wipe` / `is_strip`). The fit's `main()`
   and `reclean_all.py` both call it. A hand-mirrored copy of that
@@ -550,7 +620,24 @@ comic, page or round showed them.
   stand on (a blue rim can sit just over the wall from the white glow). A
   balloon leaked onto sky keeps the plain wall: its letters stand on white.
 
+- A DARK COLOURED BALLOON FILL (a mid green whose weakest channel sits
+  near 55) broke three light-fill assumptions in clean_bubble at once: the
+  interior's WALL (ink under DARK_MAX - 20) took the whole fill, so the
+  interior came back as a few bright specks and the letters were
+  repainted with the fallback white; the lettering cut-off's floor of 60
+  sat over the fill, so every fill pixel read as lettering; and the soft
+  cut-off (fill - 30) fell under the strict one, so the letters' rims —
+  greyish, or the upscale's bright halos — printed as outlines round the
+  new text. Wall and cut-off are now held under a fraction of the fill
+  (estimated from the mask before the flood), and on a dark fill anything
+  in the text block off the fill's own colour is old lettering.
+
 ## Caption boxes
+- A PALE BOX WITH DARK LETTERS can pass for a white-letter box: an upscale
+  leaves bright slivers beside dark strokes, they read as white letters on
+  a flat pale fill, and the box became a `dark` entry the clean painted
+  black. In a white-letter box the white letters are the ink; when the
+  box's dark letters out-ink them, it is not one.
 - A caption box on a FLAT COLOURED fill (white on purple or blue, red on
   yellow) is invisible to every letter pass: white-on-black wants a black
   ring, the paper and tint passes want paper or letters dark in EVERY
@@ -571,6 +658,18 @@ comic, page or round showed them.
   one-word caption seeds a 5-letter block.
   A drawn frame does NOT separate boxes from art — the line just outside a
   real box is frame + art, no more uniform than art's own edges.
+- A BALLOON ON A TINTED FILL (pale blue, jagged or oval outline) passes the
+  tinted-box test, and a box keeps no mask: the fit wiped it as a caption
+  box, painting fill over the outline's spikes and the art in its
+  rectangle's corners. `tinted_balloon` takes the fill region of the
+  block's OWN colour (the "tinted" test alone also accepts pink or pale art
+  beside it, and the region ran on into that), hole-filled and closed
+  inside a window round the block, and calls it a balloon when 3 of its
+  rectangle's 4 corners are empty — then it is a `bubble` with that mask.
+  Corners, not overall fill: a drop cap over a box's corner, or letters cut
+  into its edge, take a box under any fill bar but empty one corner, never
+  three. A balloon cut by the page edge fills the corners on that side;
+  judge it by the others.
 - A caption box never holds a BALLOON. A flat-coloured PANEL (a sign, a
   screen) with a paper balloon over it passes every box test, and replacing
   would delete the balloon: refuse a box when any entry it would replace
@@ -652,6 +751,13 @@ comic, page or round showed them.
   frame and leaves a tab of fill colour on the artwork beside it. Do not pad
   the box outward to catch ink just outside it: that lets artwork into the
   region, the frame detection loses edges and the repaint spills further.
+- A COLOURED FRAME (red round a yellow box) is invisible to that max-channel
+  test, and a side inside the box rect is too short to pass for a curve, so
+  the box wipe painted it with the fill and the box printed bigger than the
+  original. Spare the PIXELS of an edge column/row that is near-solid in
+  `tint_ink`'s sense (far below the fill's luminance) — never take them as
+  the frame's BOUNDS: confining the repaint to them squares off a rounded
+  frame's corners.
 - A CAPTION BOX IS FOUND FROM ITS FRAME (`frame_box` +
   `auto_caption_boxes`), not from detection's strips. A gradient box
   defeats detection in more shapes than the tint+bubble pair: one strip that
@@ -669,6 +775,16 @@ comic, page or round showed them.
   or a line cut side by side, or several members no pair covers); where
   hand `box` overrides exist they match its frames to ~2px. A hand
   override always wins.
+- A COLOURED FRAME is no wall for the true-black flood: a bright blue (or
+  red) stroke has no dark channel, so the flood runs out through it into a
+  sky of the fill's own colour and the box is lost. The fit then sets it as
+  a balloon whose flood stops where the gradient darkens: the top line
+  stays uncleaned and the new text is squeezed into the pale rows.
+  `frame_box` tries last with a LUMINANCE wall (FRAME_COLOUR_LUMA) — a
+  saturated stroke is far darker than the pale fill it holds — and only
+  where the ink and regrow tries found nothing, so every box found before
+  is found exactly as before; the rectangle, holes and four-sides tests
+  still refuse ovals.
 - A GRADED caption box can have too few letters for EITHER letter pass:
   on its tinted part letter_mask sees letter + fill as one dark blob, on its
   white part the tint ring test fails, and a two-word time stamp has 7
@@ -676,6 +792,11 @@ comic, page or round showed them.
   letters on either ground (BOX_MIN_LETTERS 5) and requires a drawn FRAME on
   all four sides as the evidence; it only ADDS boxes that overlap no
   existing entry, so no transcript key moves except by the inserted entry.
+  The frame is dark in every channel OR by luminance (FRAME_LUMA_MAX): a
+  NAVY frame's blue channel is far over any "dark" bar. "Overlap" is a real
+  share of the block (GRADED_OVERLAP): at this stage a neighbour's bbox can
+  still be a provisional joined region, and one touching the caption's
+  block by a pixel row hid it.
 - A FRAME DETECTION ONLY PART-HOLDS is a box too: when the entries cover
   under FRAME_HELD (0.85) of the frame's rows, `auto_caption_boxes` makes
   the frame the box. Boxes held whole cover >= 0.90, part-held ones
@@ -729,7 +850,45 @@ comic, page or round showed them.
   the entry's own ink (`orig_ink`): on a yellow fill "dark in every
   channel" is the whole box.
 
+- A CAPTION BOX WIPED WHOLE (`wipe_caption_boxes`) repaints everything
+  inside the box, so a coloured drop cap over its corner went with the
+  lettering: the box wipe honours its members' `keep` rectangles exactly
+  like the per-entry cleaner (one function, called by the fit and by
+  reclean_all).
+- A `box` override is the TEXT area, not the wipe: the detected box is
+  still wiped beside it (narrowed to clear a drop cap, the override box
+  leaves old letters beside the cap that only the detected box covers).
+  Where the DETECTED box is wrong — it reaches up over the art above the
+  caption and the wipe paints that art with fill-coloured rows — a `wipe`
+  override replaces it as the region wiped. Keep a `wipe` region inside a
+  coloured frame: its sides inside the region smear into the row fill.
+- A TILTED (or rounded) box's upright bbox takes in wedges of the art round
+  its edges. Shadowed art is dark in every channel, so it reads as ink and
+  was repainted with the fill: the box printed as an upright rectangle.
+  `clean_caption_box` spares coloured ink that reaches the window border in
+  a hue unlike the fill's (`coloured_unlike_fill`). The hue test is
+  essential: a saturated yellow fill is itself "ink" to the min channel
+  beside a paler part of its gradient, and taken for art it dragged the
+  first and last letter of every line into the spared set. The art joins
+  `keep` only AFTER the welded-letter reclaim: carving it out of the reclaim
+  instead cut an adjacent frame into letter-sized pieces that were wiped.
+
 ## Fit, sizing and placement
+- THE ORIGINAL'S SIZE ON MIXED-CASE LETTERING is its CAP height, not the
+  median letter: most mixed-case letters stand at the x-height, so the
+  median read the x-height, the dialogue ceiling max(book, original) stayed
+  at the book size and the new capitals printed smaller than the original's
+  while the report claimed a gain. `cap_measure`: when a quarter of the
+  (not thin) letters stand well over the median, their median is the cap
+  height; thin strokes (the bars of ! and ¡) never vote — a shout's row of
+  exclamation marks is not a row of capitals. A short balloon has too few
+  letters to tell, and one balloon's accents or descenders read a few px
+  tall, so `issue_mixed_caps` gives every mixed-case balloon of an issue
+  with several of them the issue's cap height — and every other dialogue
+  balloon measured under it (a shout in capitals keeps its own, larger
+  size): one letterer, one size. It measures the WHOLE issue, the pages
+  outside the run from their pristine copies, so a single-page rebuild
+  sizes its page like the full fit did.
 - One long word must never shrink a bubble: `hyphenate`/`split_word` break
   it (prefer a vowel|consonant point, ≥2 chars a side, reuse an existing
   hyphen). Cap the fragments (MAX_PIECES) and return the words UNTOUCHED

@@ -22,9 +22,14 @@ STAGE=os.environ.get('STAGE', f'{SP}/stage')
 old=json.load(open(BASE))
 new=json.load(open(NEWLAY))
 # a subset re-fit only holds the pages it was given; everything else must
-# fall through to the snapshot untouched
-new={k:v for k,v in new.items()}
-nums={os.path.splitext(k)[0]:v for k,v in json.load(open(f'xcf/{C}/numbers.json')).items()}
+# fall through to the snapshot untouched. The re-fit names pages as the file
+# system spells them (NFD on some machines) while the layout keeps the
+# spelling it was written with: match in NFC and keep the LAYOUT's spelling,
+# or an accented page is added a second time instead of replaced.
+nfc=lambda k: unicodedata.normalize('NFC', k)
+spell={nfc(k): k for k in old}
+new={spell.get(nfc(k), k): v for k, v in new.items()}
+nums={nfc(os.path.splitext(k)[0]):v for k,v in json.load(open(f'xcf/{C}/numbers.json')).items()}
 stems=sorted(set(old)|set(new))
 changed, merged = [], {}
 for stem in stems:
@@ -40,7 +45,7 @@ for stem in stems:
         pix_diff = a is None or b is None or a.shape!=b.shape or \
                    int(np.abs(a.astype(np.int16)-b.astype(np.int16)).max())>12
     if lay_diff or pix_diff:
-        changed.append((nums.get(stem,'-'),stem,lay_diff,pix_diff))
+        changed.append((nums.get(nfc(stem),'-'),stem,lay_diff,pix_diff))
         merged[stem]=n if n is not None else o
     else:
         merged[stem]=o          # verbatim: untouched page keeps its entries

@@ -358,7 +358,8 @@ def save_page(result: Image.Image, src: Path, out_dir: Path) -> Path:
     return dest
 
 
-def ai_scale(img: Image.Image, target: tuple, scale: float) -> Image.Image:
+def ai_scale(img: Image.Image, target: tuple, scale: float,
+             model: str = None) -> Image.Image:
     """Return img scaled to exactly target: Lanczos only when shrinking
     (nothing to gain from AI), otherwise Real-ESRGAN at its smallest covering
     native scale, Lanczos down to target, and local color pinned to the
@@ -370,7 +371,10 @@ def ai_scale(img: Image.Image, target: tuple, scale: float) -> Image.Image:
     if scale > 4:
         print(f"  WARNING: needs {scale:.2f}x, model gives 4x; "
               f"the rest is plain resampling")
-    model_scale = 2 if scale <= 2 else 3 if scale <= 3 else 4
+    model = model or REALESRGAN_MODEL
+    # the animevideo model ships 2x/3x/4x; the others are 4x only
+    model_scale = (4 if model != "realesr-animevideov3"
+                   else 2 if scale <= 2 else 3 if scale <= 3 else 4)
 
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf_in:
         tmp_in = Path(tf_in.name)
@@ -380,7 +384,7 @@ def ai_scale(img: Image.Image, target: tuple, scale: float) -> Image.Image:
         img.save(tmp_in, format="PNG")
         proc = subprocess.run(
             [str(REALESRGAN), "-i", str(tmp_in), "-o", str(tmp_out),
-             "-n", REALESRGAN_MODEL, "-s", str(model_scale),
+             "-n", model, "-s", str(model_scale),
              "-m", str(REALESRGAN.parent / "models")],
             capture_output=True, text=True)
         if proc.returncode != 0 or not tmp_out.stat().st_size:
@@ -1058,6 +1062,75 @@ def folio_plan(comic_dir: Path, cache_dir: Path = None) -> dict:
     return plan
 
 
+UPSCALE_OVERRIDES = "upscale_overrides.json"
+UPSCALE_OVERRIDE_FIELDS = ("crop", "rotate", "model", "levels")
+
+
+def upscale_overrides(comic_dir: Path) -> dict:
+    """The editor's per-page upscale settings, from
+    upscaled/<comic>/upscale_overrides.json: {key: {field: value}}, a key
+    being a source filename or an fnmatch pattern (one entry for a whole
+    story). Keys are NFC like every other per-page file. Fields:
+      crop   [x0, y0, x1, y1] in SOURCE px (after `rotate`): replaces the
+             content crop and the folio-band trim. A photographed open
+             book prints its art on a black margin with the spine's shadow
+             and the facing page's edge beside it — all content to
+             crop_to_content.
+      rotate degrees counter-clockwise (PIL), applied before the crop: the
+             scan's skew, which a crop tight to the frames makes visible.
+      model  the Real-ESRGAN model (the anime model turns a grainy scan of
+             flat-colour art back into flat colour).
+      levels true: stretch the page's tones (black point to black, capped)
+             and lift saturation slightly before the AI pass — a dull,
+             greyed scan of a page printed on black.
+    Changing a fitted page's upscale is a rebuild (GOTCHAS.md)."""
+    import json
+    f = REPO / "upscaled" / Path(comic_dir).name / UPSCALE_OVERRIDES
+    if not f.is_file():
+        return {}
+    return {_nfc(k): v for k, v in json.loads(f.read_text()).items()}
+
+
+def page_overrides(src: Path) -> dict:
+    """The merged override fields for one source page: matching patterns
+    first (in file order), the exact filename last, so it wins per field."""
+    import fnmatch
+    name = _nfc(src.name)
+    out = {}
+    entries = upscale_overrides(src.parent)
+    for key, val in entries.items():
+        if key != name and fnmatch.fnmatchcase(name, key):
+            out.update(val)
+    out.update(entries.get(name, {}))
+    unknown = set(out) - set(UPSCALE_OVERRIDE_FIELDS)
+    if unknown:
+        raise ValueError(f"{src.name}: unknown upscale override "
+                         f"field(s) {sorted(unknown)}")
+    return out
+
+
+LEVELS_BLACK_MAX = 40     # never lift the black point past this luma
+LEVELS_WHITE_MIN = 215    # nor pull the white point under this one
+LEVELS_SATURATION = 1.1
+
+
+def apply_levels(img: Image.Image) -> Image.Image:
+    """Stretch a dull scan: per channel, the 0.5th percentile becomes black
+    and the 99.7th white, both capped so a page that is mostly black or mostly
+    light is not blown out; then a slight saturation lift."""
+    import numpy as np
+    from PIL import ImageEnhance
+    a = np.asarray(img.convert("RGB"), dtype=np.float32)
+    flat = a.reshape(-1, 3)
+    # per channel: the scan's black is tinted (purple, brown), and the page
+    # is printed onto a pure black background
+    lo = np.minimum(np.percentile(flat, 0.5, axis=0), LEVELS_BLACK_MAX)
+    hi = np.maximum(np.percentile(flat, 99.7, axis=0), LEVELS_WHITE_MIN)
+    a = (a - lo) * (255.0 / np.maximum(1.0, hi - lo))
+    out = Image.fromarray(np.clip(a + 0.5, 0, 255).astype(np.uint8))
+    return ImageEnhance.Color(out).enhance(LEVELS_SATURATION)
+
+
 def upscale_spec(src: Path) -> dict:
     """How this page will be produced: the (possibly cropped) content image,
     kind ('single' or 'spread'), scale, target size and split point. Shared
@@ -1068,6 +1141,7 @@ def upscale_spec(src: Path) -> dict:
     fit the full canvas."""
     img = Image.open(src)
     img.load()
+    ov = {}
     if "cover" in src.stem.lower():
         box, note, is_cover = cover_box(), ", cover: fit inside trim", True
     elif img.height > img.width and is_index_page(src):
@@ -1075,24 +1149,43 @@ def upscale_spec(src: Path) -> dict:
     else:
         folios = folio_plan(src.parent).get(_nfc(src.name), [])
         img = erase_folios(img, folios)
-        cropped = crop_to_content(img)
-        if folios:
-            cropped = trim_folio_band(cropped, img)
+        ov = page_overrides(src)
+        box = ov.get("crop")
+        if ov.get("rotate"):
+            img = img.convert("RGB").rotate(
+                float(ov["rotate"]), resample=Image.BICUBIC,
+                fillcolor=paper_color(src))
+        if box:
+            cropped = img.crop(tuple(int(v) for v in box))
+        else:
+            cropped = crop_to_content(img)
+            if folios:
+                cropped = trim_folio_band(cropped, img)
         note = (f", cropped from {img.width}x{img.height}"
                 if cropped.size != img.size else "")
+        if box:
+            note += " (crop override)"
+        if ov.get("rotate"):
+            note += f", deskewed {float(ov['rotate']):+.2f} deg"
         if folios:
             note += ", original page number erased"
         img = cropped
         box, is_cover = story_box(), False
+        if ov.get("levels"):
+            img = apply_levels(img)
+            note += ", levels"
     w, h = img.size
+    model = ov.get("model", REALESRGAN_MODEL)
     if is_cover or h >= w or w / h < SPREAD_MIN_RATIO:
         scale = fit_scale(w, h, box)
         return {"kind": "single", "img": img, "scale": scale, "note": note,
-                "target": (round(w * scale), round(h * scale))}
+                "target": (round(w * scale), round(h * scale)),
+                "model": model}
     split_x = pick_split_x(img)
     scale = fit_scale(max(split_x, w - split_x), h, story_box())
     return {"kind": "spread", "img": img, "scale": scale, "note": note,
-            "target": (round(w * scale), round(h * scale)), "split_x": split_x}
+            "target": (round(w * scale), round(h * scale)), "split_x": split_x,
+            "model": model}
 
 
 def upscale_realesrgan(src: Path, out_dir: Path) -> Path:
@@ -1102,7 +1195,9 @@ def upscale_realesrgan(src: Path, out_dir: Path) -> Path:
     (left) and <name>-2 (right)."""
     spec = upscale_spec(src)
     img, scale, target = spec["img"], spec["scale"], spec["target"]
-    result = ai_scale(img, target, scale)
+    result = ai_scale(img, target, scale, spec["model"])
+    if spec["model"] != REALESRGAN_MODEL:
+        spec["note"] += f", model {spec['model']}"
     if spec["kind"] == "single":
         dest = save_page(result, src, out_dir)
         with Image.open(dest) as check:
@@ -1473,6 +1568,7 @@ def cmd_compose(in_dir: Path, xcf_dir: Path, pdf_dir: Path,
 # >= 0.44; story pages have paper fraction <= 0.67.
 INDEX_MIN_PAPER = 0.70
 INDEX_MAX_INK_RUN = 0.15
+INDEX_DARK_PAPER = 140    # paper luma under the ink threshold: not light paper
 
 
 def paper_page_kind(path: Path):
@@ -1491,6 +1587,11 @@ def paper_page_kind(path: Path):
                            a[:, :3].reshape(-1, 3), a[:, -3:].reshape(-1, 3)])
     paper = np.median(ring, axis=0)
     if (np.abs(a - paper).max(axis=2) <= 26).mean() < INDEX_MIN_PAPER:
+        return None
+    # the ink test below assumes LIGHT paper: on a page printed on black,
+    # every row of paper reads as ink, so a story page (dark art, white
+    # balloons) came back 'art' — no page number, and detection skipped it
+    if paper @ np.array([0.299, 0.587, 0.114]) < INDEX_DARK_PAPER:
         return None
     luma = a @ np.array([0.299, 0.587, 0.114])
     inky = (luma < 140).sum(axis=1) > 0.01 * w
@@ -1929,8 +2030,11 @@ def pending_add(work: Path) -> list:
     lpath = work / "layout.json"
     if _issue_plan().load_plan(work) is None or not lpath.is_file():
         return []
-    done = set(json.loads(lpath.read_text()))
-    return [s for s in reletter_pages(work) if s not in done]
+    # compared NFC: the layout keeps the spelling the fit wrote, the page
+    # list comes from the files on disk, which a copy between machines can
+    # turn NFD — a raw comparison sent every accented page to --add
+    done = {_nfc(s) for s in json.loads(lpath.read_text())}
+    return [s for s in reletter_pages(work) if _nfc(s) not in done]
 
 
 def restore_kept_pages(work: Path, upscaled_dir: Path, xcf_dir: Path,

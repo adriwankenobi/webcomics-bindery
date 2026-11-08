@@ -114,6 +114,7 @@ OVAL_SCALE = 0.98       # an "oval" lobe: its rectangle's ellipse, a hair inside
 SIBLING_MIN_LETTERS = 4  # a neighbour's letters inside a mask that make
                          # its text, not a stray piece (sibling_letter_box)
 KEEP_CHROMA = 40        # max - min channel: coloured ink, not lettering
+ART_HUE_DEG = 25        # art beside a caption box: this far from the fill's hue
 FILL_TREND_MIN = 8     # levels a fill must depart from its row level by
                         # before the repaint follows it (fill_trend)
 # a word shorter than this is never hyphenated: breaking it to buy a size or
@@ -1186,12 +1187,29 @@ def orig_flush_left(img, b, cap):
     return bx + float(np.median(starts))
 
 
+def entry_flush(img, b, oldh, ov):
+    """The x an entry's lines start at, or None (centred): a `{"flush": x}`
+    override (page x — beside a drop cap the text must start against the
+    cap to read as the rest of its word, and a two-line caption is too
+    short for the measurement; a list gives each line its own x, the last
+    one for every line after it: a cap one line tall has its first line
+    beside it and the rest back under it), else the original's own flush
+    edge."""
+    if ov and ov.get("flush") is not None:
+        f = ov["flush"]
+        return [float(v) for v in f] if isinstance(f, list) else float(f)
+    return orig_flush_left(img, b, oldh)
+
+
 def flush_left_lines(entry, rows, left):
-    """Set an entry's lines flush left at the original's edge `left`,
-    each kept inside its own row span (it never moves a line out of the
-    writing area it was fitted in)."""
+    """Set an entry's lines flush left at the original's edge `left` (or
+    `left[i]` for line i, the last for the rest), each kept inside its own
+    row span (it never moves a line out of the writing area it was fitted
+    in)."""
     lh = entry["line_height"]
-    for ln in entry["lines"]:
+    edges = left if isinstance(left, list) else [left]
+    for li, ln in enumerate(entry["lines"]):
+        left = edges[min(li, len(edges) - 1)]
         y0 = int(ln["y_top"])
         spans = [rows[yy] for yy in range(y0, y0 + lh) if yy in rows]
         if not spans:
@@ -2251,6 +2269,24 @@ def frame_bounds(region):
             min(bot) if bot else h2)
 
 
+def coloured_unlike_fill(region, ink):
+    """Pixels of `region` (RGB) that are coloured (KEEP_CHROMA) in a hue
+    at least ART_HUE_DEG away from the box fill's — the fill measured as
+    the pixels `ink` leaves. A neutral fill (white, grey) has no hue: then
+    every coloured pixel qualifies."""
+    hsv = cv2.cvtColor(np.ascontiguousarray(region), cv2.COLOR_RGB2HSV_FULL)
+    rgb = region.astype(np.int16)
+    chroma = rgb.max(axis=2) - rgb.min(axis=2)
+    coloured = chroma >= KEEP_CHROMA
+    hue = hsv[..., 0].astype(np.float32) * (2 * np.pi / 256)
+    fill = ~ink & coloured
+    if fill.sum() < 0.2 * max(1, (~ink).sum()):
+        return coloured                     # a neutral fill
+    fh = np.arctan2(np.sin(hue[fill]).mean(), np.cos(hue[fill]).mean())
+    d = np.abs(np.angle(np.exp(1j * (hue - fh))))
+    return coloured & (d >= np.radians(ART_HUE_DEG))
+
+
 def clean_caption_box(img, box):
     """Wipe the old lettering from a whole coloured caption box.
 
@@ -2312,6 +2348,27 @@ def clean_caption_box(img, box):
     # alone sees never spares what the max channel calls lettering.
     keep = curves(ink_max) | (curves(ink) & ~ink_max)
     ink |= ink_max
+    # A TILTED box: its bbox takes in wedges of the artwork round its slanted
+    # edges, darker than the fill, so they read as ink and were repainted
+    # with the fill — the box printed as an upright rectangle over the art.
+    # The art is COLOURED (KEEP_CHROMA: shadowed orange is dark in every
+    # channel, so darkness alone cannot tell it) in a hue OTHER than the
+    # fill's, and reaches the window's border; lettering is near-neutral and
+    # sits inside. Spare such pieces whole, with the art's own dark line
+    # work where it touches them. The hue test is what keeps the fill out:
+    # a saturated yellow fill is "ink" to the min channel wherever it meets
+    # a paler part of its own gradient, and taken for art it dragged the
+    # first and last letter of every line into the spared set.
+    col = ink & coloured_unlike_fill(region, ink)
+    nc, labc = cv2.connectedComponents(col.astype(np.uint8), connectivity=8)
+    art = np.zeros(ink.shape, bool)
+    if nc > 1:
+        rim = np.concatenate([labc[0], labc[-1], labc[:, 0], labc[:, -1]])
+        ids = np.unique(rim[rim > 0])
+        if len(ids):
+            art = np.isin(labc, ids)
+            art |= (cv2.dilate(art.astype(np.uint8),
+                               np.ones((7, 7), np.uint8)) > 0) & ink
     # the drawn frame, found by its geometry rather than by looking like a
     # curve, and everything outside it left alone: the box rectangle runs
     # wide of the frame, so repainting the whole of it wiped the frame and
@@ -2358,6 +2415,29 @@ def clean_caption_box(img, box):
                 keep &= ~(cv2.dilate(reclaim.astype(np.uint8),
                                      np.ones((2 * r + 1, 2 * r + 1),
                                              np.uint8)) > 0)
+    # ...and the art beside a tilted box joins the spared set only now, so
+    # the weld test above sees exactly what it saw before: cut into slices
+    # by its own strokes the art is letter-sized and would be reclaimed, and
+    # carving it out of `welded` instead cut a frame touching it into
+    # letter-sized pieces.
+    keep |= art
+    # A COLOURED frame (red round a yellow box) is neither: frame_bounds
+    # looks for black rules, and a side inside the box rect is too short to
+    # pass for a curve, so it was wiped as coloured ink and the box printed
+    # bigger than the original. Spare its pixels where an edge column or
+    # row is near-solid in tint_ink's sense (far below the fill in
+    # luminance) — those pixels only: taking them as the frame's BOUNDS
+    # squares off a rounded frame's corners with the repaint.
+    lum = cv2.cvtColor(np.ascontiguousarray(region), cv2.COLOR_RGB2GRAY)
+    cdark = lum <= float(np.median(lum)) - TINT_LUMA_DROP
+    bx, by = max(2, min(8, w2 // 6)), max(2, min(8, h2 // 6))
+    colf, rowf = cdark.mean(axis=0), cdark.mean(axis=1)
+    for c in list(range(bx)) + list(range(w2 - bx, w2)):
+        if colf[c] >= 0.75:
+            keep[:, c] |= cdark[:, c]
+    for r in list(range(by)) + list(range(h2 - by, h2)):
+        if rowf[r] >= 0.75:
+            keep[r, :] |= cdark[r, :]
     if inner is not None:
         outside = ~ins
         keep |= outside
@@ -2490,6 +2570,11 @@ def keep_coloured(img, before, rects, chroma=KEEP_CHROMA, rim=6):
         img[y0:y1, x0:x1][col] = before[y0:y1, x0:x1][col]
 
 
+DARK_FILL_CUT = 0.6   # clean_bubble: lettering cut-off never over this x fill
+DARK_FILL_REF = 150   # ...a fill darker than this (weakest channel) is dark
+DARK_FILL_TOL = 25    # ...where off its colour by this, in the block, = ink
+
+
 def clean_bubble(img, b, mask, allowed_ys=None):
     if b.get("keep"):
         # an override's `keep` rectangles: coloured art over the balloon
@@ -2543,8 +2628,15 @@ def clean_bubble(img, b, mask, allowed_ys=None):
         minch = region.min(axis=2)
         # the WALL is drawn ink only — a strong threshold, so that a tinted
         # fill (yellow caption, blue box) whose own luminance sits near the
-        # ink cut-off cannot fragment the interior into bands
-        stroke = (minch <= DARK_MAX - 20).astype(np.uint8)
+        # ink cut-off cannot fragment the interior into bands. And never
+        # over the fill itself: a dark coloured fill (a mid green, weakest
+        # channel ~55) was ALL wall, the interior came back as a few bright
+        # specks, and the letters were repainted with the fallback white.
+        # The fill is most of the mask (the lettering a fraction of it).
+        inmask = minch[mask > 0]
+        fill_est = float(np.percentile(inmask, 60)) if inmask.size else 255.0
+        stroke = (minch <= min(DARK_MAX - 20, DARK_FILL_CUT * fill_est)
+                  ).astype(np.uint8)
         bx2, by2, bw2, bh2 = b["block"]
         interior = bubble_interior(stroke, keep_ring, (
             max(0, bx2 - x), max(0, by2 - y),
@@ -2552,7 +2644,10 @@ def clean_bubble(img, b, mask, allowed_ys=None):
         # ...and what counts as old lettering adapts to THIS balloon's fill,
         # capped so that a striped or grey-shaded balloon keeps its shading
         ref = float(np.median(minch[interior])) if interior.any() else 255.0
-        cut = min(DARK_MAX + 40, max(60.0, ref - 60.0))
+        # ...and always UNDER the fill: the 60 floor is for light fills; a
+        # dark coloured one (a mid green, weakest channel ~55) sat under it,
+        # the whole interior read as lettering and was wiped to white
+        cut = min(DARK_MAX + 40, max(60.0, ref - 60.0), DARK_FILL_CUT * ref)
         dark = (minch <= cut).astype(np.uint8)
         # What to wipe. Enclosure alone is not enough: a joined-balloon
         # split can truncate the mask mid-text, and letters straddling that
@@ -2680,6 +2775,17 @@ def clean_bubble(img, b, mask, allowed_ys=None):
         # past the outline, so a block-bounded soft threshold caught the art
         # as ink and the row median painted it with the fill colour — white
         # rectangles across the page.
+        # On a DARK coloured fill the soft cut-off falls under the strict
+        # one (ref - 30 < cut) and catches nothing, while the scan's rims
+        # round the old strokes — greyish, or bright halos — stand out
+        # against the fill and printed as letter outlines round the new
+        # text. Inside the text block, anything off the fill's own colour is
+        # the old lettering there.
+        if ref < DARK_FILL_REF and interior.any() and sx1 > sx0 and sy1 > sy0:
+            fillc = np.median(region[interior], axis=0)
+            off = (np.abs(region[sy0:sy1, sx0:sx1].astype(np.int16) - fillc)
+                   .max(axis=2) > DARK_FILL_TOL)
+            soft[sy0:sy1, sx0:sx1] |= off
         soft &= solid
         soft &= ~(cv2.dilate(protect.astype(np.uint8),
                              np.ones((5, 5), np.uint8)) > 0)
@@ -2709,6 +2815,19 @@ def clean_bubble(img, b, mask, allowed_ys=None):
         ink = ((((dark > 0) & home) | far | soft)
                & (keep_ring > 0) & ~protect)
         ink |= solid & (dark > 0)        # enclosed letters, always
+        # A letter's COUNTER goes with the letter. Where a line is welded to
+        # the balloon's edge (a bite), its counters are neither fill
+        # (`interior`) nor holes in it (`solid`), so the soft cut-off never
+        # reaches their pale antialiased rims: they printed as faint
+        # letter-shaped rings after the letters around them were wiped. A
+        # letter-sized hole the wiped ink itself encloses is that counter.
+        if cap and ink.any():
+            holes = fill_holes(ink) & ~ink
+            nh, lh, sth, _ = cv2.connectedComponentsWithStats(
+                holes.astype(np.uint8), 8)
+            for ci in range(1, nh):
+                if sth[ci, 3] <= 1.2 * cap and sth[ci, 2] <= 2 * cap:
+                    ink |= lh == ci
         ink = ink.astype(np.uint8)
         halo = cv2.dilate(ink, np.ones((9, 9), np.uint8)) > 0
         # the row median that replaces the letters is measured on the fill
@@ -2858,14 +2977,114 @@ def orig_ink(reg, kind):
     return reg.min(axis=2) <= DARK_MAX
 
 
+MIXED_TALL = 1.25    # a letter this much over the median is a capital,
+                     # ascender or descender of mixed-case lettering
+MIXED_SHARE = 0.25   # ...and this share of the letters being tall says so
+MIXED_MIN = 8        # ...counted only over this many letters
+MIXED_WIDE = 0.4     # ...each at least this wide for its height
+
+
 def old_cap_height(img, b):
+    return cap_measure(img, b)[0]
+
+
+def cap_measure(img, b):
+    """(the original lettering's cap height, mixed case?): the median
+    letter height.
+
+    MIXED-CASE lettering has most of its letters at the x-height, and the
+    median read THAT — the "original size" the fit never sets dialogue
+    under was an x-height, so max(book, original) stayed at the book size
+    and the new capitals printed smaller than the original's. When a
+    quarter of the letters stand MIXED_TALL over the median (capitals,
+    ascenders, descenders: about the cap height), those are the measure.
+    In capitals only accented and descending letters are taller — far
+    fewer than a quarter."""
     bx, by, bw, bh = b["block"]
     reg = img[by:by + bh, bx:bx + bw]
     dark = orig_ink(reg, b["kind"]).astype(np.uint8)
     n, _, stats, _ = cv2.connectedComponentsWithStats(dark, 8)
-    hs = [stats[i][3] for i in range(1, n)
-          if 9 <= stats[i][3] <= 48 and stats[i][4] >= 8]
-    return float(np.median(hs)) if hs else 0.0
+    keep = [i for i in range(1, n)
+            if 9 <= stats[i][3] <= 48 and stats[i][4] >= 8]
+    hs = [stats[i][3] for i in keep]
+    if not hs:
+        return 0.0, False
+    med = float(np.median(hs))
+    # thin strokes (the bars of ! and ¡, an I or l) never vote: a shout's
+    # row of exclamation marks is not a row of capitals
+    wide = [stats[i][3] for i in keep
+            if stats[i][2] >= MIXED_WIDE * stats[i][3]]
+    tall = [h for h in wide if h >= MIXED_TALL * med]
+    if len(wide) >= MIXED_MIN and len(tall) >= MIXED_SHARE * len(wide):
+        return float(np.median(tall)), True
+    return med, False
+
+
+MIXED_ISSUE_MIN = 3   # mixed-case balloons that make an issue mixed case
+
+
+def issue_mixed_caps(all_pending, transcripts=None) -> None:
+    """One letterer, one size: an issue lettered in MIXED CASE has its
+    short balloons ("Oh, no.") measured at the x-height too — too few
+    letters for cap_measure to see the capitals — so they alone would keep
+    the book size while the long balloons beside them rise to the
+    original's. When MIXED_ISSUE_MIN of an issue's balloons measured mixed
+    case, the issue's cap height (their median) is the original size of
+    every mixed-case balloon in it and of every other dialogue balloon
+    measured under it.
+
+    Measured over the WHOLE issue, not the pages being fitted: a
+    single-page rebuild sees one page, too few balloons to tell, and set
+    that page a size smaller than the rest of its story. The issue's other
+    pages are read from their pristine copies (balloons with text only —
+    art false positives have letter-like marks of every height); without
+    `transcripts` or a pristine/ folder, the run's own pages are all."""
+    from make_sheets import issue_of
+    caps, seen = {}, set()
+    for path, pending, _, _, _ in all_pending:
+        seen.add(unicodedata.normalize("NFC", path.stem))
+        caps.setdefault(issue_of(path.stem), [])
+        for p in pending:
+            if p.get("mixed") and p["oldh"]:
+                caps[issue_of(path.stem)].append(p["oldh"])
+    pristine = REPO / "relettering" / COMIC / "pristine" if COMIC else None
+    if transcripts is not None and pristine is not None \
+            and pristine.is_dir():
+        for j in sorted(BUB.glob("*.json")):
+            stem = unicodedata.normalize("NFC", j.stem)
+            if stem in seen or issue_of(stem) not in caps:
+                continue
+            texts = transcripts.get(data_key(j.stem, transcripts))
+            pic = [q for q in (pristine / (j.stem + ".jpg"),
+                               pristine / (stem + ".jpg")) if q.is_file()]
+            if texts is None or not pic:
+                continue
+            bubbles = json.loads(j.read_text())
+            if len(texts) != len(bubbles):
+                continue
+            img = None
+            for b, t in zip(bubbles, texts):
+                if b.get("kind") != "bubble" or not t.strip():
+                    continue
+                if img is None:
+                    img = cv2.cvtColor(cv2.imread(str(pic[0])),
+                                       cv2.COLOR_BGR2RGB)
+                h, mixed = cap_measure(img, b)
+                if mixed and h:
+                    caps[issue_of(stem)].append(h)
+    for path, pending, _, _, _ in all_pending:
+        hs = caps.get(issue_of(path.stem), [])
+        if len(hs) < MIXED_ISSUE_MIN:
+            continue
+        cap = float(np.median(hs))
+        for p in pending:
+            # a mixed-case balloon IS this letterer's size: one measured a
+            # few px taller (an accent touching its capital, a descender)
+            # was set bigger than its neighbours. A shout in capitals is
+            # not mixed and keeps its own size where that is larger.
+            if (p["b"]["kind"] in ("bubble", "dark", "open", "tint")
+                    and p["oldh"] and (p.get("mixed") or p["oldh"] < cap)):
+                p["oldh"] = cap
 
 
 def orig_ink_rgb(img, b):
@@ -3024,6 +3243,21 @@ def page_caption_boxes(bubbles, stem):
     return cap_box, cap_mem, cap_members
 
 
+def wipe_caption_boxes(img, stem, boxes):
+    """Wipe each (box, members) of `boxes_to_wipe` whole — and put back the
+    coloured art any member's override names in `keep` (a drop cap printed
+    over the box's corner): the box wipe repaints everything inside the
+    frame, so without it `keep` only protected entries cleaned one by one.
+    The ONE place the box wipe happens (the fit and reclean_all call it)."""
+    for box, mem in boxes:
+        keep = [r for bi in sorted(mem)
+                for r in ((override_for(stem, bi) or {}).get("keep") or [])]
+        before = img.copy() if keep else None
+        clean_caption_box(img, box)
+        if keep:
+            keep_coloured(img, before, keep)
+
+
 def boxes_to_wipe(bubbles, stem, fitted):
     """The caption boxes to clean as ONE box, for a page whose typeset
     entries are `fitted`. Shared with reclean_all for the same reason
@@ -3039,10 +3273,20 @@ def boxes_to_wipe(bubbles, stem, fitted):
     """
     boxes = []
     framed = AUTO_MEMBERS.get(stem, set())
+    # A `box` override is where the TEXT goes, not what is wiped: the
+    # detected box still is (a box narrowed to clear a drop cap leaves old
+    # letters beside the cap that only the detected box covers). Where the
+    # detected box itself is wrong — it reaches up over the art above the
+    # caption, which the wipe then paints with fill-coloured rows — a
+    # `wipe` override names the region to wipe instead.
+    wipes = {bi: tuple(ov["wipe"]) for bi in range(1, len(bubbles) + 1)
+             for ov in [override_for(stem, bi) or {}] if "wipe" in ov}
     for _bx, _mem in caption_boxes(bubbles,
                                    set(range(1, len(bubbles) + 1))):
         if _mem & framed:
             continue                # wiped whole, as its framed box
+        if _mem & set(wipes):
+            continue                # wiped as its override region below
         if not _mem & fitted:
             continue                # no member typeset: it keeps its own text
         if _mem <= fitted or all(is_strip(bubbles[i - 1]) for i in _mem):
@@ -3051,6 +3295,9 @@ def boxes_to_wipe(bubbles, stem, fitted):
         ov = override_for(stem, bi)
         if ov and "box" in ov:
             boxes.append((tuple(ov["box"]), {bi}))
+    for bi in sorted(wipes):
+        if bi in fitted:
+            boxes.append((wipes[bi], {bi}))
     return boxes
 
 
@@ -3077,10 +3324,17 @@ def frame_box(img, block, bbox):
     Only where that finds no box is it tried again with the fill regrown
     into the wall (`regrow_fill`): every box the plain flood finds is found
     exactly as before, and the regrow can only add the ones whose graded
-    fill the wall ate along an edge."""
-    for regrow in (False, True):
+    fill the wall ate along an edge.
+
+    Last, a COLOURED frame: a bright blue (or red) stroke has no dark
+    channel, so the black-ink wall let the flood out through it into a sky
+    of the fill's own colour and the box was lost. The third try walls
+    with luminance (`FRAME_COLOUR_LUMA`) — a saturated stroke is far darker
+    than the pale fill it holds — and again only where both tries above
+    found nothing."""
+    for mode in ("ink", "regrow", "colour"):
         for mx, my in ((260, 200), (700, 400)):
-            got = _frame_box(img, block, bbox, mx, my, regrow)
+            got = _frame_box(img, block, bbox, mx, my, mode)
             if got != "escaped":
                 break
         if got not in (None, "escaped"):
@@ -3088,7 +3342,11 @@ def frame_box(img, block, bbox):
     return None
 
 
-def _frame_box(img, block, bbox, mx, my, regrow=False):
+FRAME_COLOUR_LUMA = 140  # frame_box's last try: a coloured frame stroke
+                         # (bright blue ~110 luma) against its pale fill (190+)
+
+
+def _frame_box(img, block, bbox, mx, my, mode="ink"):
     H, W = img.shape[:2]
     bx, by, bw, bh = block
     X0, Y0 = max(0, min(bx, bbox[0]) - mx), max(0, min(by, bbox[1]) - my)
@@ -3098,13 +3356,16 @@ def _frame_box(img, block, bbox, mx, my, regrow=False):
         return None
     reg = img[Y0:Y1, X0:X1]
     dark = frame_wall(reg)
+    if mode == "colour":
+        dark = dark | (cv2.cvtColor(np.ascontiguousarray(reg),
+                                    cv2.COLOR_RGB2GRAY) <= FRAME_COLOUR_LUMA)
     _, lab = cv2.connectedComponents((~dark).astype(np.uint8), 4)
     sub = lab[by - Y0:by + bh - Y0, bx - X0:bx + bw - X0]
     vals, cnt = np.unique(sub[sub > 0], return_counts=True)
     if not len(vals):
         return None
     comp = lab == vals[cnt.argmax()]
-    if regrow:
+    if mode == "regrow":
         comp = regrow_fill(reg, comp, dark)
     ys, xs = np.nonzero(comp)
     x0, y0, x1, y1 = xs.min(), ys.min(), xs.max() + 1, ys.max() + 1
@@ -3515,7 +3776,7 @@ def prepare_bubble(stem, bi, b, img, texts, bubbles, cap_box, cap_mem):
                                _cx1 - _cx0 - 2 * _ii,
                                _cy1 - _cy0 - 2 * _ii],
                      bbox=[_cx0, _cy0, _cx1 - _cx0, _cy1 - _cy0])
-    oldh = old_cap_height(img, b)
+    oldh, mixed_case = cap_measure(img, b)
     if sole_box and _ovm and _ovm.get("cap_h"):
         oldh = _ovm["cap_h"]        # measured on the whole framed box
 
@@ -3701,7 +3962,8 @@ def prepare_bubble(stem, bi, b, img, texts, bubbles, cap_box, cap_mem):
     else:
         jobs.append((bi, b_clean, mask, allowed))
     return {"mask": mask, "b": b, "b_clean": b_clean,
-            "oldh": oldh, "rows": rows, "rows_fit": rows_fit,
+            "oldh": oldh, "mixed": mixed_case,
+            "rows": rows, "rows_fit": rows_fit,
             "rows_raw": rows_raw, "allowed": allowed,
             "forced_lobes": forced_lobes, "lobe_jobs": lobe_jobs,
             "auto_lobes": auto_lobes,
@@ -3820,8 +4082,10 @@ def collect_page(path, transcripts, all_pending):
                         "rows": (inset_rows(rows_fit or rows)
                                  if b["kind"] == "bubble" else rows),
                         "cys": [cy],
-                        "oldh": oldh, "ov": override_for(path.stem, bi),
-                        "flush": orig_flush_left(img, b, oldh),
+                        "oldh": oldh, "mixed": prep.get("mixed", False),
+                        "ov": override_for(path.stem, bi),
+                        "flush": entry_flush(img, b, oldh,
+                                             override_for(path.stem, bi)),
                         "ink": orig_ink_rgb(img, b),
                         "porig": (orig_para_axes(img, b, len(paras) + 1)
                                   if paras else None),
@@ -4048,8 +4312,8 @@ def typeset_page(fit, path, pending, clean_jobs, img, bubbles, book,
     # under the new line. Both strips are typeset, so wiping the whole
     # box is safe. `box` in an override covers a box detection did not
     # split but only half-masked.
-    for box, _ in boxes:
-        clean_caption_box(img, box)
+    if boxes:
+        wipe_caption_boxes(img, path.stem, boxes)
         changed = True
     if changed:
         out = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
@@ -4064,9 +4328,14 @@ def stems_to_add(done, transcript_stems, kept):
     """Transcribed pages a finished fit has not laid out yet (`done` = the
     layout's pages — the layout is the authority on what is fitted): an
     issue the user flipped from keep to re-letter after the fit."""
-    done = set(done)
+    # compared NFC: an accented name can be NFD on disk (and so in the
+    # transcripts merged from it) and NFC in the layout — a raw comparison
+    # called every such page unfitted and re-fitted it
+    nfc = lambda s: unicodedata.normalize("NFC", s)  # noqa: E731
+    done = {nfc(s) for s in done}
+    kept = {nfc(s) for s in kept}
     return sorted(s for s in transcript_stems
-                  if s not in kept and s not in done)
+                  if nfc(s) not in kept and nfc(s) not in done)
 
 
 def write_fit_meta(work, book):
@@ -4081,7 +4350,8 @@ def write_fit_meta(work, book):
 def merge_layout(old, new):
     """Add newly fitted pages to a layout; a page already in it is never
     overwritten (that would re-fit an approved page)."""
-    clash = sorted(set(old) & set(new))
+    nfc = lambda s: unicodedata.normalize("NFC", s)  # noqa: E731
+    clash = sorted({nfc(s) for s in old} & {nfc(s) for s in new})
     if clash:
         raise ValueError(f"already laid out: {', '.join(clash[:5])}")
     return {**old, **new}
@@ -4121,6 +4391,8 @@ def main():
         if path.stem in kept:
             continue
         collect_page(path, transcripts, all_pending)
+
+    issue_mixed_caps(all_pending, transcripts)
 
     # ---- global fitting ----
     # per-bubble maxima (margin/open notes stay near their original size).

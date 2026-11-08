@@ -77,5 +77,37 @@ class EntryColour(unittest.TestCase):
         self.assertEqual(self.F.orig_size(0.0, 0.7), 0)
 
 
+@unittest.skipUnless(HAVE_CV2, "cv2 only in .venv-reletter")
+class FlushOverride(unittest.TestCase):
+    """`{"flush": x}`: lines start at page x — the text beside a drop cap
+    reads as the rest of the word only set flush left against the cap, and
+    a two-line caption is too short for orig_flush_left to see it."""
+    def setUp(self):
+        self.F = load_fit()
+
+    def test_override_wins(self):
+        img = np.full((100, 300, 3), 250, np.uint8)
+        b = {"kind": "bubble", "block": [10, 10, 200, 60]}
+        self.assertEqual(self.F.entry_flush(img, b, 20.0, {"flush": 37}),
+                         37.0)
+
+    def test_per_line_edges(self):
+        # a drop cap one line tall: line 1 starts after the cap, the rest
+        # back at the box's edge under it
+        entry = {"line_height": 30, "lines": [
+            {"y_top": 0.0, "cx": 150.0, "width": 80.0},
+            {"y_top": 30.0, "cx": 150.0, "width": 120.0},
+            {"y_top": 60.0, "cx": 150.0, "width": 100.0}]}
+        rows = {y: (10, 290) for y in range(0, 90)}
+        self.F.flush_left_lines(entry, rows, [100, 40])
+        self.assertEqual([ln["cx"] - ln["width"] / 2 for ln in entry["lines"]],
+                         [100.0, 40.0, 40.0])
+
+    def test_measured_without_override(self):
+        img = np.full((100, 300, 3), 250, np.uint8)
+        b = {"kind": "bubble", "block": [10, 10, 200, 60]}
+        self.assertIsNone(self.F.entry_flush(img, b, 20.0, None))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -64,8 +64,7 @@ for si, stem in enumerate(stems, 1):
         for jbi, jb, jmask, jallowed in prep["jobs"]:
             if jbi in fitted and jbi not in in_box:
                 F.clean_bubble(img, jb, jmask, jallowed)
-    for box, _ in boxes:
-        F.clean_caption_box(img, box)
+    F.wipe_caption_boxes(img, stem, boxes)
     cv2.imwrite(f"{OUT}/{stem}.jpg", cv2.cvtColor(img, cv2.COLOR_RGB2BGR),
                 [cv2.IMWRITE_JPEG_QUALITY, 95,
                  int(cv2.IMWRITE_JPEG_SAMPLING_FACTOR),

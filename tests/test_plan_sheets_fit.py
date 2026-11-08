@@ -101,6 +101,25 @@ class FitHelpers(unittest.TestCase):
         self.assertEqual(F.stems_to_add(["A"], ["C", "A", "B"], {"C"}),
                          ["B"])
 
+    def test_stems_to_add_ignores_the_unicode_spelling(self):
+        """An accented name can be NFD on disk (and so in the transcripts
+        merged from it) and NFC in the layout. A raw comparison called every
+        such page unfitted, and --add re-fitted pages already laid out."""
+        import unicodedata
+        F = self.load()
+        nfc = unicodedata.normalize("NFC", "Series 13 - T\u00edtulo 012")
+        nfd = unicodedata.normalize("NFD", nfc)
+        self.assertEqual(F.stems_to_add([nfc], [nfd], set()), [])
+        self.assertEqual(F.stems_to_add([], [nfd], {nfc}), [])
+
+    def test_merge_layout_clash_ignores_the_unicode_spelling(self):
+        import unicodedata
+        F = self.load()
+        nfc = unicodedata.normalize("NFC", "Series 13 - T\u00edtulo 012")
+        nfd = unicodedata.normalize("NFD", nfc)
+        with self.assertRaises(ValueError):
+            F.merge_layout({nfc: []}, {nfd: []})
+
     def test_fit_meta_only_where_the_plan_lives(self):
         """An approved comic (no decisions) never gets a new file from a
         re-fit; a planned one records its book size for --add."""

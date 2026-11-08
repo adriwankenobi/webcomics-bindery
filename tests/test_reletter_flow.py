@@ -413,6 +413,21 @@ class KeepOrReletterPlan(unittest.TestCase):
         write_json(self.work / "issue_overrides.json", {"6.01": "reletter"})
         self.assertEqual(process.pending_add(self.work), [KEPT])
 
+    def test_pending_add_ignores_the_unicode_spelling(self):
+        """The layout keeps the spelling the fit wrote (NFC); the page
+        list comes from the files on disk, which a copy between machines
+        can turn NFD. A raw comparison sent every accented page to --add."""
+        import unicodedata
+        plan_dir(self.work)
+        acc = "Series 6.28 T\u00edtulo 005"
+        write_json(self.work / "bubbles"
+                   / f"{unicodedata.normalize('NFD', acc)}.json", [{}])
+        write_json(self.work / "layout.json",
+                   {RELET: [], unicodedata.normalize("NFC", acc): []})
+        write_json(self.work / "fit_meta.json", {"book": 20})
+        self.assertEqual(len(process.reletter_pages(self.work)), 2)
+        self.assertEqual(process.pending_add(self.work), [])
+
     def test_pending_add_trusts_the_layout_not_fit_meta(self):
         """A page in layout.json IS fitted, whatever a side file says: a
         stale stems list re-cleaned approved pages."""

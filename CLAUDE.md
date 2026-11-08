@@ -33,7 +33,9 @@ topic's section of GOTCHAS.md. Key facts a session needs:
   ({"size": N | "orig"} | {"color": "orig" | [r,g,b]} | {"anchor":
   "visual"} | {"anchor": "lines"} | {"box": [x0,y0,x1,y1]} | {"lobes":
   [[x0,y0,x1,y1], ...]} (+ "oval": true for a gapped outline)) |
-  {"keep": [[x0,y0,x1,y1], ...]} (coloured art the wipe must spare),
+  {"keep": [[x0,y0,x1,y1], ...]} (coloured art the wipe must spare) |
+  {"wipe": [x0,y0,x1,y1]} (region a caption box wipe covers instead of
+  the detected box; "box" stays the text area),
   fit_policy.json
   (per-book typographic calls an approved book must not inherit:
   {"frame_pairs": true} = a split caption pair in a frame is one box),

@@ -43,9 +43,18 @@ LETTER_AREA_MAX = 2200
 MIN_LETTERS = 8           # a real text block has at least this many blobs
 SPLIT_MIX = 0.2           # split_by_balloon: letters one balloon may stray
 SPLIT_HELD = 0.9          # ...and share of each block inside its balloon
+JOIN_LINE_GAP = 1.2       # stacked_blocks: max gap between two lines of one
+                          # balloon, in the lines' median letter heights
+JOIN_LINE_OVERLAP = 0.8   # ...and share of the narrower line under the other
+JOIN_LINE_CLEAR = 0.95    # ...and share of the gap that is the balloon's fill
 BOX_MIN_LETTERS = 5       # ...or this many inside a drawn caption frame
 FUSED_LETTER_W = 0.75     # a capital's width over its height, for counting
                           # the letters in a fused blob
+TINT_CORNER = 0.15         # corner patch of a tinted region's rectangle
+TINT_CORNER_EMPTY = 0.35   # ...under this much fill = an empty corner; a
+                           # balloon on a tinted fill leaves 3-4 of them
+FRAME_LUMA_MAX = 50        # a caption frame dark by luminance (navy)
+GRADED_OVERLAP = 0.10      # share of a framed caption's block another entry may cover
 SHORT_TWO_LINE_MIN = 5    # letter blobs a short two-line cluster of BIG
                           # letters needs to be measured in its own lines
 PAD_FRAC = 0.03
@@ -425,12 +434,88 @@ def flat_caption_boxes(img: np.ndarray) -> list:
                      near[y0:y1, x1 + 2:x1 + o])
             if max((s.mean() if s.size else 0.0) for s in sides) > 0.3:
                 continue
+            if sense == 1:
+                # DARK lettering on a pale box: the bright slivers an
+                # upscale leaves beside its strokes pass for white letters
+                # on a pale-blue fill, and the box became a `dark` entry
+                # that the clean painted black. White letters are the ink
+                # of a white-letter box; here the dark letters out-ink them.
+                fb = fl[y0:y1, x0:x1]
+                if (fb == 2).sum() > (fb == 1).sum():
+                    continue
             blk = (max(bx, x0), max(by, y0),
                    min(bx + bw, x1) - max(bx, x0),
                    min(by + bh, y1) - max(by, y0))
             if blk[2] > 0 and blk[3] > 0:
                 found.append((kind, blk, (x0, y0, x1 - x0, y1 - y0)))
     return found
+
+
+def tinted_balloon(img, tb, letters, block):
+    """(x, y, interior) when the tinted region round `block` is a BALLOON,
+    else None (a tinted caption box, or no closed region at all).
+
+    The tinted-box pass grows a rectangle while the fill holds and keeps no
+    mask, so the fit wiped a jagged pale-blue balloon as a caption box: fill
+    painted over the outline's spikes and the art in the rectangle's
+    corners. A box fills its own bounding rectangle; an oval or jagged
+    balloon leaves its corners empty. The region is the tinted fill
+    connected to the block's letters (`tb` holds fill AND letters), with
+    its holes filled, and it must close inside a window round the block —
+    a fill that runs off it is a panel, not a balloon. The page edge is
+    no such border: a balloon cut by it is still a balloon.
+
+    "Tinted" is a broad test (bright in one channel, below LIGHT_MIN in
+    another) that pink or pale art beside the balloon passes too, and the
+    region ran on into it — so it is held to the fill's OWN colour
+    (FLAT_TOL of the median round the letters)."""
+    H, W = tb.shape
+    bx, by, bw, bh = block
+    pad = max(bw, bh)
+    x0, y0 = max(0, bx - pad), max(0, by - pad)
+    x1, y1 = min(W, bx + bw + pad), min(H, by + bh + pad)
+    reg = img[y0:y1, x0:x1].astype(np.int16)
+    lt = letters[y0:y1, x0:x1] > 0
+    fillpx = (tb[y0:y1, x0:x1] & ~lt)[by - y0:by - y0 + bh, bx - x0:bx - x0 + bw]
+    if not fillpx.any():
+        return None
+    c = np.median(reg[by - y0:by - y0 + bh, bx - x0:bx - x0 + bw][fillpx],
+                  axis=0)
+    own = (np.abs(reg - c).max(axis=2) <= FLAT_TOL) | lt
+    n, lab = cv2.connectedComponents(own.astype(np.uint8), 8)
+    ids = lab[by - y0:by - y0 + bh, bx - x0:bx - x0 + bw]
+    ids = ids[ids > 0]
+    if not len(ids):
+        return None
+    comp = lab == np.bincount(ids).argmax()
+    rows, cols = np.flatnonzero(comp.any(axis=1)), np.flatnonzero(comp.any(axis=0))
+    if ((rows[0] == 0 and y0 > 0) or (cols[0] == 0 and x0 > 0)
+            or (rows[-1] == comp.shape[0] - 1 and y1 < H)
+            or (cols[-1] == comp.shape[1] - 1 and x1 < W)):
+        return None                 # runs off the window: not a closed shape
+    comp = comp[rows[0]:rows[-1] + 1, cols[0]:cols[-1] + 1].astype(np.uint8)
+    flood = np.pad(comp, 1)
+    cv2.floodFill(flood, np.zeros((flood.shape[0] + 2, flood.shape[1] + 2),
+                                  np.uint8), (0, 0), 1)
+    interior = (comp | (1 - flood[1:-1, 1:-1])).astype(np.uint8)
+    # a box fills its rectangle's CORNERS; an oval or jagged balloon leaves
+    # all four empty. Not the rectangle's overall fill: a drop cap printed
+    # over a box's corner, or letters cut into its edge, take a box well
+    # under any fill bar — one corner, never three.
+    ih, iw = interior.shape
+    ch, cw = max(2, int(TINT_CORNER * ih)), max(2, int(TINT_CORNER * iw))
+    corners = (interior[:ch, :cw], interior[:ch, -cw:],
+               interior[-ch:, :cw], interior[-ch:, -cw:])
+    # a balloon CUT by the page edge fills the corners on that side; judge
+    # it by the others (a box cut there still fills those)
+    cut = (x0 + cols[0] == 0, x0 + cols[-1] == W - 1,
+           y0 + rows[0] == 0, y0 + rows[-1] == H - 1)
+    on_edge = ((cut[0] or cut[2]), (cut[1] or cut[2]),
+               (cut[0] or cut[3]), (cut[1] or cut[3]))
+    if sum(e or c.mean() < TINT_CORNER_EMPTY
+           for c, e in zip(corners, on_edge)) < 3:
+        return None                 # a caption box
+    return x0 + int(cols[0]), y0 + int(rows[0]), interior
 
 
 def paragraph_blocks(letters: np.ndarray,
@@ -459,6 +544,110 @@ def paragraph_blocks(letters: np.ndarray,
         if count >= min_letters and w >= 40 and h >= 14:
             blocks.append((x, y, w, h))
     return blocks
+
+
+def _fill_label(labels: np.ndarray, letters: np.ndarray, box) -> int:
+    """The light component a block's text is printed on: the most common
+    label among the non-letter light pixels inside its box (0 = none)."""
+    x, y, w, h = (int(v) for v in box)
+    sub = labels[y:y + h, x:x + w]
+    cand = sub[(sub > 0) & (letters[y:y + h, x:x + w] == 0)]
+    return int(np.bincount(cand).argmax()) if len(cand) else 0
+
+
+def stacked_blocks(letters: np.ndarray, labels: np.ndarray) -> list:
+    """paragraph_blocks, with the lines of ONE balloon that its vertical
+    join left apart put back together.
+
+    Mixed-case lettering set large: a line of x-height-only words starts an
+    ascender's height lower than a capital would, so its gap from the line
+    above runs past the join, and the balloon comes out as two blocks (two
+    entries, two transcripts, each fitted into half a balloon) — or, when
+    that line holds fewer than MIN_LETTERS blobs, as a block plus a
+    leftover the short-utterance pass makes an entry of its own. Fragments
+    (blocks of ANY letter count) are joined when they are stacked, the
+    narrower one at least JOIN_LINE_OVERLAP under the other, the gap is at
+    most JOIN_LINE_GAP of their median letter height, both sit on the SAME
+    light component and the gap between them is that component's fill
+    (JOIN_LINE_CLEAR: no outline, no art) — two balloons, however close,
+    are two components. The letter count is judged on the joined block.
+    Nothing joined = exactly paragraph_blocks."""
+    frags = [list(b) for b in paragraph_blocks(letters, min_letters=1)]
+    if len(frags) < 2:
+        return paragraph_blocks(letters)
+    _, ll, ls, _ = cv2.connectedComponentsWithStats(letters, 8)
+    cyl = ls[:, 1] + ls[:, 3] / 2
+    cxl = ls[:, 0] + ls[:, 2] / 2
+
+    def letter_h(b):
+        x, y, w, h = b
+        sel = ((cxl >= x) & (cxl < x + w) & (cyl >= y) & (cyl < y + h))
+        sel[0] = False
+        return float(np.median(ls[sel, 3])) if sel.any() else 0.0
+
+    joined = True
+    while joined:
+        joined = False
+        for i, a in enumerate(frags):
+            for j, b in enumerate(frags):
+                if i == j or b[1] < a[1]:
+                    continue
+                gap = b[1] - (a[1] + a[3])
+                ox0, ox1 = max(a[0], b[0]), min(a[0] + a[2], b[0] + b[2])
+                if (gap < 0 or ox1 - ox0
+                        < JOIN_LINE_OVERLAP * min(a[2], b[2])):
+                    continue
+                lh = letter_h(merge_boxes(a, b))
+                if not lh or gap > JOIN_LINE_GAP * lh:
+                    continue
+                lab = _fill_label(labels, letters, a)
+                if not lab or _fill_label(labels, letters, b) != lab:
+                    continue
+                if gap:
+                    g = labels[a[1] + a[3]:b[1], ox0:ox1]
+                    gl = letters[a[1] + a[3]:b[1], ox0:ox1]
+                    if ((g == lab) | (gl > 0)).mean() < JOIN_LINE_CLEAR:
+                        continue
+                frags[i] = list(merge_boxes(a, b))
+                del frags[j]
+                joined = True
+                break
+            if joined:
+                break
+    out = []
+    for x, y, w, h in frags:
+        k, _, _, _ = cv2.connectedComponentsWithStats(
+            letters[y:y + h, x:x + w], 8)
+        if k - 1 >= MIN_LETTERS and w >= 40 and h >= 14:
+            out.append((x, y, w, h))
+    return out
+
+
+def trim_strays(blk, groups: dict, keys: list, ll: np.ndarray,
+                st: np.ndarray, labels: np.ndarray) -> list:
+    """A one-balloon block that swept up a few marks OUTSIDE its balloon (a
+    ship in the sky just past the outline, on a line of the text): those
+    marks vote for another light component, too few to be a balloon of
+    their own, and lie outside the balloon's box. Kept, they pull the block
+    over the art — the bubble is then picked from the art around them, the
+    strict flood starts there and the mask leaks into the sky, and the
+    clean wipes the marks as letters. The block is re-made from the other
+    letters; the dropped marks stay inside the original block, which the
+    caller still counts as claimed."""
+    if len(keys) != 1:
+        return [blk]
+    k0 = keys[0]
+    ys, xs = np.nonzero(labels == k0)
+    x0, y0, x1, y1 = xs.min(), ys.min(), xs.max() + 1, ys.max() + 1
+    strays = [i for k, g in groups.items()
+              if k and k != k0 and len(g) < MIN_LETTERS for i in g
+              if not (x0 <= st[i, 0] + st[i, 2] / 2 < x1
+                      and y0 <= st[i, 1] + st[i, 3] / 2 < y1)]
+    if not strays:
+        return [blk]
+    kept = [i for g in groups.values() for i in g if i not in strays]
+    redone = stacked_blocks(np.isin(ll, kept).astype(np.uint8), labels)
+    return redone or [blk]
 
 
 def split_by_balloon(blocks: list, letters: np.ndarray,
@@ -507,7 +696,7 @@ def split_by_balloon(blocks: list, letters: np.ndarray,
         keys = [k for k, g in groups.items() if k and len(g) >= MIN_LETTERS]
         big = [groups[k] for k in keys]
         if len(big) < 2:
-            out.append(blk)
+            out.extend(trim_strays(blk, groups, keys, ll, ls, labels))
             continue
         for k, g in groups.items():
             if k and len(g) >= MIN_LETTERS:
@@ -1019,7 +1208,7 @@ def detect_page(path: Path):
         return (closed | (1 - flood))[6:-6, 6:-6]
 
     entries = {}
-    raw = paragraph_blocks(letters)
+    raw = stacked_blocks(letters, labels)
     pblocks = split_by_balloon(raw, letters, labels)
     # what a split block covered stays claimed (below): the short-utterance
     # pass must not read the art marks it swept up as new utterances
@@ -1246,7 +1435,13 @@ def detect_page(path: Path):
         # to four thin marks each
         inked = (cst[1:, 4].sum()
                  / max(1, (cst[1:, 2] * cst[1:, 3]).sum())) if cnt else 0.0
-        lettering = (cnt >= SHORT_TWO_LINE_MIN and inked >= 0.38
+        # a big, thin-stroked font with round letters fills ~0.31-0.37 of
+        # its boxes, and its two short lines then read as "tall" — a
+        # free-standing two-line reply was refused for having no host. The
+        # art this bar keeps out is two to four thin marks, which
+        # SHORT_TWO_LINE_MIN already refuses, so one bar for every count
+        lettering = (cnt >= SHORT_TWO_LINE_MIN
+                     and inked >= 0.30
                      and cst[1:, 4].sum() >= 0.2 * med_h * med_h * cnt)
         tall = bh > (max(60, 2.5 * med_h + 8) if lettering else 60)
         if not (2 <= cnt and bw >= 30
@@ -1565,6 +1760,16 @@ def detect_page(path: Path):
                 break
         if tb[gy0:gy1, gx0:gx1].mean() < 0.85:
             continue  # dark blobs on tinted art, not a solid caption box
+        shaped = tinted_balloon(img, tb, tletters, (bx, by, bw, bh))
+        if shaped is not None:
+            sx, sy, interior = shaped
+            entries[("tint", bx // 50, by // 50)] = {
+                "kind": "bubble", "strict": True,
+                "block": [int(bx), int(by), int(bw), int(bh)],
+                "bbox": [int(sx), int(sy), int(interior.shape[1]),
+                         int(interior.shape[0])],
+                "mask": interior, "paragraphs": 1}
+            continue
         entries[("tint", bx // 50, by // 50)] = {
             "kind": "tint", "block": [int(bx), int(by), int(bw), int(bh)],
             "bbox": [int(gx0), int(gy0),
@@ -1607,14 +1812,22 @@ def detect_page(path: Path):
     specks[1:] = ((tcstats[1:, 3] <= LETTER_H[1])
                   & (tcstats[1:, 2] <= LETTER_W_MAX))
     gb = gbg | (gletters > 0) | specks[tclabels] | (letters > 0)
-    frame = img.max(axis=2) <= 90
+    # ...dark in every channel, or a NAVY frame: (0, 7, 111) has a blue
+    # channel far over any "dark" bar and a luminance of 17. Luminance alone
+    # would take saturated red art (luma ~60) for a frame, hence the low bar
+    frame = ((img.max(axis=2) <= 90)
+             | (cv2.cvtColor(img, cv2.COLOR_RGB2GRAY) <= FRAME_LUMA_MAX))
     for (bx, by, bw, bh) in paragraph_blocks(gletters,
                                              min_letters=BOX_MIN_LETTERS,
                                              fused=True):
-        if any(min(bx + bw, e["bbox"][0] + e["bbox"][2])
-               > max(bx, e["bbox"][0])
-               and min(by + bh, e["bbox"][1] + e["bbox"][3])
-               > max(by, e["bbox"][1]) for e in entries.values()):
+        # "overlaps" = a real share of the block's letters inside: an
+        # entry's bbox here can still be a provisional joined region, and
+        # one touching a caption's block by a pixel row hid the caption
+        if any(max(0, min(bx + bw, e["bbox"][0] + e["bbox"][2])
+                   - max(bx, e["bbox"][0]))
+               * max(0, min(by + bh, e["bbox"][1] + e["bbox"][3])
+                     - max(by, e["bbox"][1]))
+               > GRADED_OVERLAP * bw * bh for e in entries.values()):
             continue
         # grown until the frame stops it — the frame is required below,
         # and a short caption's letters can sit far from its sides
@@ -2208,6 +2421,7 @@ def common_frame(ma, boxa, mb, boxb):
 # ported from process.py: classify mostly-paper pages (index/credits vs art)
 INDEX_MIN_PAPER = 0.70
 INDEX_MAX_INK_RUN = 0.15
+INDEX_DARK_PAPER = 140
 
 
 def paper_page_kind(path):
@@ -2222,6 +2436,9 @@ def paper_page_kind(path):
                            a[:, :3].reshape(-1, 3), a[:, -3:].reshape(-1, 3)])
     paper = np.median(ring, axis=0)
     if (np.abs(a - paper).max(axis=2) <= 26).mean() < INDEX_MIN_PAPER:
+        return None
+    # dark paper: every paper row would read as ink (see process.py)
+    if paper @ np.array([0.299, 0.587, 0.114]) < INDEX_DARK_PAPER:
         return None
     luma = a @ np.array([0.299, 0.587, 0.114])
     inky = (luma < 140).sum(axis=1) > 0.01 * w

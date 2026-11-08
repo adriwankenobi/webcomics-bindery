@@ -242,6 +242,33 @@ class FrameBox(unittest.TestCase):
         self.assertTrue(all(abs(a - b) <= 2 for a, b in
                             zip(r, (100, 100, 700, 300))), r)
 
+    def test_box_with_a_coloured_frame_is_found(self):
+        # a pale-blue-to-white caption box drawn with a BRIGHT blue frame
+        # on a sky of the same blue: no channel of the frame is dark, so
+        # the black-ink wall let the flood out and the box was lost (the
+        # fit then set it as a balloon whose flood stopped where the
+        # gradient darkens, leaving the top line uncleaned)
+        img = np.full((500, 900, 3), (160, 215, 245), np.uint8)
+        x0, y0, x1, y1 = 100, 100, 700, 300
+        for yy in range(y0, y1):
+            t = (yy - y0) / (y1 - y0 - 1)
+            img[yy, x0:x1] = (int(148 + 100 * t), int(213 + 38 * t), 248)
+        cv2.rectangle(img, (x0 - 4, y0 - 4), (x1 + 3, y1 + 3),
+                      (6, 135, 229), 4)
+        blk = letters(img, 150, 230, 12, 2)            # only the low lines
+        r = self.fit.frame_box(img, blk, blk)
+        self.assertIsNotNone(r, "a box with a blue frame was not found")
+        self.assertTrue(all(abs(a - b) <= 2 for a, b in
+                            zip(r, (100, 100, 700, 300))), r)
+
+    def test_coloured_oval_balloon_is_still_not_a_box(self):
+        img = np.full((500, 900, 3), (160, 215, 245), np.uint8)
+        cv2.ellipse(img, (400, 200), (250, 120), 0, 0, 360,
+                    (255, 255, 255), -1)
+        cv2.ellipse(img, (400, 200), (250, 120), 0, 0, 360, (6, 135, 229), 4)
+        blk = letters(img, 290, 170, 10, 2)
+        self.assertIsNone(self.fit.frame_box(img, blk, blk))
+
     def test_art_inside_the_frame_is_not_a_caption(self):
         img = np.full((500, 900, 3), (230, 230, 230), np.uint8)
         framed_box(img, 100, 100, 700, 400)
